@@ -59,7 +59,8 @@ Use `--no-web` to run the MCP server alone.
 - **Decks** — your decks (Arena's ~108 precons are behind a toggle). Each opens
   with its card list, mana curve, land count and Arena export text.
 - **Collection** — known-owned cards with colour, rarity and cost filters.
-- **Cards** — search all 21,004 Arena cards with an owned count on each.
+- **Cards** — search all 21,004 Arena cards with an owned count on each, and
+  an "Owned only" toggle to restrict the search to your collection.
 - **Deck Builder** — see below.
 
 Cards show as an image grid by default with a table toggle; the choice is
@@ -78,11 +79,32 @@ Arena-importable export.
 | Tool | Purpose |
 |---|---|
 | `get_deck_candidates` | Format-legal cards you own, with wildcard stock |
-| `validate_deck` | Size, four-copy limit *by card name*, legality, cost |
+| `validate_deck` | Size, four-copy limit *by card name*, legality, cost, budget |
 | `save_suggested_deck` | Write the finished deck back to the app |
+| `import_deck` | Parse Arena-format decklist text and save it, same as above |
 | `export_deck_arena` | Arena import text for an existing deck |
 
 There is also a `build_deck` MCP prompt carrying the same brief.
+
+**Every path back to Arena is the same text format.** `validate_deck`,
+`save_suggested_deck`, `import_deck` and `export_deck_arena` all return
+`arena_export` — lines like `4 Lightning Bolt (STA) 42` under `Deck` /
+`Sideboard` / `Commander` headers, which Arena's own deck importer accepts
+directly. The GUI's "Copy for Arena" button on any deck or saved suggestion
+copies this text.
+
+**Wildcard budget.** Independent of what you can *afford* (wildcard stock,
+checked automatically), you can cap what an agent is allowed to *spend* on one
+deck — e.g. "at most 1 rare wildcard, 0 mythic." Set it in the GUI's Deck
+Builder panel before generating a brief, or pass `wildcard_budget` directly to
+`validate_deck`/`save_suggested_deck` (`{"rare": 1, "mythic": 0}`). A rarity
+left out of the budget means zero of that rarity is allowed, not unlimited.
+
+**Two ways to get a deck into the app.** An agent can build one from scratch
+via the tool chain above, or you can hand it (or the GUI's import box) a
+decklist as plain Arena-format text — from an agent that answered in chat
+without touching MCP, or a list found elsewhere — and `import_deck` parses,
+validates, and saves it the same way.
 
 ## MCP tools
 

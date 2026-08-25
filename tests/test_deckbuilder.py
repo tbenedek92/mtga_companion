@@ -241,3 +241,133 @@ class TestSuggestions:
 
     def test_missing_suggestion_returns_none(self, conn):
         assert db.get_suggestion(conn, 999) is None
+
+
+class TestWildcardBudget:
+    def test_no_budget_is_always_within_budget(self, conn):
+        cost = db.wildcard_cost(conn, [{"name": "Sheoldred", "quantity": 4}])
+        result = db.check_wildcard_budget(cost, None)
+        assert result == {"budget_set": False, "within_budget": True, "over_budget": {}}
+
+    def test_within_budget(self, conn):
+        cost = db.wildcard_cost(conn, [{"name": "Sheoldred", "quantity": 2}])
+        result = db.check_wildcard_budget(cost, {"mythic": 5})
+        assert result["budget_set"] is True
+        assert result["within_budget"] is True
+        assert result["over_budget"] == {}
+
+    def test_over_budget_reports_the_shortfall(self, conn):
+        cost = db.wildcard_cost(conn, [{"name": "Sheoldred", "quantity": 8}])
+        result = db.check_wildcard_budget(cost, {"mythic": 1})
+        assert result["within_budget"] is False
+        assert result["over_budget"] == {"mythic": 7}
+
+    def test_rarities_absent_from_the_budget_default_to_zero_allowance(self, conn):
+        """A budget of {"rare": 1} with no mention of mythic means zero
+        mythic wildcards are acceptable, not unlimited."""
+        cost = db.wildcard_cost(conn, [{"name": "Sheoldred", "quantity": 1}])
+        result = db.check_wildcard_budget(cost, {"rare": 5})
+        assert result["within_budget"] is False
+        assert result["over_budget"] == {"mythic": 1}
+
+    def test_free_cards_never_violate_a_budget(self, conn):
+        own(conn, 1, 4)  # Lightning Bolt, fully owned
+        cost = db.wildcard_cost(conn, [{"name": "Lightning Bolt", "quantity": 4}])
+        result = db.check_wildcard_budget(cost, {"rare": 0})
+        assert result["within_budget"] is True
+
+
+class TestParseArenaExport:
+    def test_round_trips_through_to_arena_export(self, conn):
+        original = [
+            {"name": "Lightning Bolt", "quantity": 4, "board": "main"},
+            {"name": "Mountain", "quantity": 20, "board": "main"},
+            {"name": "Counterspell", "quantity": 2, "board": "sideboard"},
+        ]
+        text = db.to_arena_export(conn, original)
+        parsed = db.parse_arena_export(text)
+        assert {(c["name"], c["quantity"], c["board"]) for c in parsed} == {
+            (c["name"], c["quantity"], c["board"]) for c in original
+        }
+
+    def test_bare_lines_without_set_info_are_accepted(self):
+        cards = db.parse_arena_export("Deck\n4 Lightning Bolt\n20 Mountain\n")
+        assert cards == [
+            {"name": "Lightning Bolt", "quantity": 4, "board": "main"},
+            {"name": "Mountain", "quantity": 20, "board": "main"},
+        ]
+
+    def test_section_headers_switch_the_board(self):
+        text = "Deck\n4 Lightning Bolt\n\nSideboard\n2 Counterspell\n\nCommander\n1 Sheoldred"
+        cards = db.parse_arena_export(text)
+        assert [(c["name"], c["board"]) for c in cards] == [
+            ("Lightning Bolt", "main"), ("Counterspell", "sideboard"),
+            ("Sheoldred", "commander"),
+        ]
+
+    def test_comments_and_blank_lines_are_ignored(self):
+        text = "// my favorite deck\nDeck\n\n4 Lightning Bolt\n// good card\n20 Mountain"
+        cards = db.parse_arena_export(text)
+        assert len(cards) == 2
+
+    def test_unparseable_lines_are_skipped_not_fatal(self):
+        text = "Deck\nAbout\nName: My Cool Deck\n4 Lightning Bolt\n"
+        cards = db.parse_arena_export(text)
+        assert cards == [{"name": "Lightning Bolt", "quantity": 4, "board": "main"}]
+
+    def test_empty_text_yields_no_cards(self):
+        assert db.parse_arena_export("") == []
+        assert db.parse_arena_export("Deck\n\nSideboard\n") == []
+
+    def test_card_names_with_punctuation_and_dfcs(self):
+        cards = db.parse_arena_export("Deck\n2 Jace, the Mind Sculptor\n1 Fire // Ice (STA) 42\n")
+        assert cards[0]["name"] == "Jace, the Mind Sculptor"
+        assert cards[1]["name"] == "Fire // Ice"
+
+
+class TestImportDeck:
+    def test_import_saves_a_playable_suggestion(self, conn):
+        text = "Deck\n4 Lightning Bolt (STA) 42\n56 Mountain\n"
+        saved = db.import_deck(conn, text, "Pasted Burn", "standard")
+
+        assert saved["name"] == "Pasted Burn"
+        assert saved["validation"]["valid"] is True
+        assert "Deck" in saved["arena_export"]
+
+        full = db.get_suggestion(conn, saved["suggestion_id"])
+        assert full["rationale"] == "Imported decklist"
+        assert sum(c["quantity"] for c in full["cards"]) == 60
+
+    def test_import_respects_a_custom_rationale(self, conn):
+        text = "Deck\n4 Lightning Bolt\n56 Mountain\n"
+        saved = db.import_deck(conn, text, "X", rationale="From a forum post")
+        full = db.get_suggestion(conn, saved["suggestion_id"])
+        assert full["rationale"] == "From a forum post"
+
+    def test_import_rejects_text_with_no_parseable_cards(self, conn):
+        with pytest.raises(ValueError, match="Could not parse"):
+            db.import_deck(conn, "not a decklist at all", "X")
+
+    def test_import_rejects_empty_text(self, conn):
+        with pytest.raises(ValueError):
+            db.import_deck(conn, "", "X")
+
+
+class TestSaveSuggestionWithBudget:
+    def test_budget_check_is_stored_alongside_validation(self, conn):
+        cards = [{"name": "Sheoldred", "quantity": 4, "board": "main"},
+                 {"name": "Mountain", "quantity": 56, "board": "main"}]
+        saved = db.save_suggestion(
+            conn, "Budgeted", "standard", cards, wildcard_budget={"mythic": 1}
+        )
+        full = db.get_suggestion(conn, saved["suggestion_id"])
+        check = full["validation"]["wildcard_budget_check"]
+        assert check["budget_set"] is True
+        assert check["within_budget"] is False
+        assert check["over_budget"] == {"mythic": 3}
+
+    def test_no_budget_given_is_recorded_as_unset(self, conn):
+        cards = [{"name": "Mountain", "quantity": 60, "board": "main"}]
+        saved = db.save_suggestion(conn, "Free", "standard", cards)
+        full = db.get_suggestion(conn, saved["suggestion_id"])
+        assert full["validation"]["wildcard_budget_check"]["budget_set"] is False

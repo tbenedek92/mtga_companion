@@ -128,3 +128,56 @@ def test_suggestions_endpoints(client):
     assert client.get("/api/suggestions").json() == []
     assert client.get("/api/suggestions/1").status_code == 404
     assert client.get("/api/suggestions/notanumber").status_code == 400
+
+
+def test_cards_owned_only_filters_to_owned(client):
+    all_cards = client.get("/api/cards?q=&limit=10").json()["count"]
+    owned_cards = client.get("/api/cards?owned_only=1").json()
+    assert owned_cards["count"] < all_cards
+    assert all(c["owned"] > 0 for c in owned_cards["cards"])
+
+
+def test_brief_includes_wildcard_budget_when_given(client):
+    data = client.get("/api/brief?format=standard&max_rare=1&max_mythic=0").json()
+    assert data["wildcard_budget"] == {"rare": 1, "mythic": 0}
+    assert "validate_deck with wildcard_budget" in data["brief"]
+
+
+def test_brief_omits_budget_language_when_not_given(client):
+    data = client.get("/api/brief?format=standard").json()
+    assert data["wildcard_budget"] is None
+    assert "wildcard_budget=" not in data["brief"]
+
+
+def test_import_deck_saves_and_is_listed(client):
+    res = client.post("/api/import-deck", json={
+        "name": "Pasted List", "text": "Deck\n4 Lightning Bolt\n56 Mountain\n",
+        "format": "standard",
+    })
+    assert res.status_code == 200
+    body = res.json()
+    assert body["name"] == "Pasted List"
+    assert "arena_export" in body
+
+    listed = client.get("/api/suggestions").json()
+    assert any(s["name"] == "Pasted List" for s in listed)
+
+
+def test_import_deck_requires_name_and_text(client):
+    assert client.post("/api/import-deck", json={"text": "4 Lightning Bolt"}).status_code == 400
+    assert client.post("/api/import-deck", json={"name": "X"}).status_code == 400
+    assert client.post("/api/import-deck", json={}).status_code == 400
+
+
+def test_import_deck_rejects_unparseable_text(client):
+    res = client.post("/api/import-deck", json={"name": "X", "text": "nothing here"})
+    assert res.status_code == 400
+    assert "Could not parse" in res.json()["error"]
+
+
+def test_import_deck_rejects_non_json_body(client):
+    res = client.post(
+        "/api/import-deck", content=b"not json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert res.status_code == 400

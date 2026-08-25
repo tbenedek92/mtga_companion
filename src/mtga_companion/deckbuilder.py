@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from collections import defaultdict
 from typing import Any, Iterable
@@ -188,6 +189,30 @@ def wildcard_cost(
     }
 
 
+def check_wildcard_budget(
+    cost: dict[str, Any], budget: dict[str, int] | None
+) -> dict[str, Any]:
+    """Compare a wildcard cost against a self-imposed spending limit.
+
+    Distinct from `wildcard_cost`'s `craftable_now`, which checks against
+    actual wildcard STOCK: this checks against how many the player is willing
+    to SPEND on this one deck -- e.g. "at most 1 rare wildcard" even if they
+    own five. Pass the `wildcards_needed` dict from `wildcard_cost`.
+    """
+    if not budget:
+        return {"budget_set": False, "within_budget": True, "over_budget": {}}
+    needed = cost.get("wildcards_needed", {})
+    over = {
+        rarity: needed[rarity] - budget.get(rarity, 0)
+        for rarity in needed
+        if needed[rarity] > budget.get(rarity, 0)
+    }
+    return {
+        "budget_set": True, "budget": dict(budget),
+        "within_budget": not over, "over_budget": over,
+    }
+
+
 def validate_deck(
     conn: sqlite3.Connection,
     cards: Iterable[dict[str, Any]],
@@ -310,6 +335,50 @@ def to_arena_export(
     return "\n".join(out)
 
 
+_SECTION_HEADERS = {
+    "deck": "main", "mainboard": "main", "main": "main", "maindeck": "main",
+    "sideboard": "sideboard",
+    "commander": "commander", "command zone": "commander",
+}
+# "4 Lightning Bolt (STA) 42" or a bare "4 Lightning Bolt" -- Arena accepts
+# both, and this mirrors what to_arena_export() emits (bare form for basics).
+_CARD_LINE = re.compile(
+    r"^(\d+)\s+(.+?)(?:\s+\(([A-Za-z0-9]{2,5})\)\s+(\S+))?$"
+)
+
+
+def parse_arena_export(text: str) -> list[dict[str, Any]]:
+    """Parse Arena-importable decklist text into [{name, quantity, board}, ...].
+
+    The inverse of to_arena_export(). Best-effort: section headers (Deck,
+    Sideboard, Commander), blank lines and // comments are recognised; a line
+    that doesn't parse as "<qty> <name>" is skipped rather than raising, since
+    decklists pasted from other sites carry stray headers ("About", deck name)
+    this format doesn't define. Card names aren't resolved to arena_ids here --
+    that happens downstream in validate_deck / wildcard_cost / save_suggestion,
+    each of which already looks a card up by name.
+    """
+    board = "main"
+    cards: list[dict[str, Any]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("//"):
+            continue
+        header = line.rstrip(":").lower()
+        if header in _SECTION_HEADERS:
+            board = _SECTION_HEADERS[header]
+            continue
+        match = _CARD_LINE.match(line)
+        if not match:
+            continue
+        qty = int(match.group(1))
+        name = match.group(2).strip()
+        if qty <= 0 or not name:
+            continue
+        cards.append({"name": name, "quantity": qty, "board": board})
+    return cards
+
+
 def deck_to_cards(conn: sqlite3.Connection, deck_id: str) -> list[dict[str, Any]]:
     """A stored deck as the {name, quantity, board} shape this module expects."""
     rows = conn.execute(
@@ -328,10 +397,18 @@ def save_suggestion(
     cards: list[dict[str, Any]],
     rationale: str | None = None,
     based_on_deck: str | None = None,
+    wildcard_budget: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    """Persist an agent's suggestion so the GUI can render it."""
+    """Persist an agent's suggestion so the GUI can render it.
+
+    `wildcard_budget`, if given, is re-checked and stored alongside the
+    validation so the GUI can show "within budget" without the caller having
+    to have called validate_deck first -- the two paths (validate then save,
+    or just save) end up with the same stored record either way.
+    """
     validation = validate_deck(conn, cards, fmt)
     cost = wildcard_cost(conn, cards)
+    validation["wildcard_budget_check"] = check_wildcard_budget(cost, wildcard_budget)
     owned = owned_by_name(conn)
 
     cur = conn.execute(
@@ -369,7 +446,37 @@ def save_suggestion(
         "format": fmt,
         "validation": validation,
         "wildcard_cost": cost,
+        "arena_export": to_arena_export(conn, cards),
     }
+
+
+def import_deck(
+    conn: sqlite3.Connection,
+    text: str,
+    name: str,
+    fmt: str = "standard",
+    rationale: str | None = None,
+    based_on_deck: str | None = None,
+) -> dict[str, Any]:
+    """Parse Arena-format decklist text and save it like an agent suggestion.
+
+    This is the second way a deck gets into the app: an agent that built a
+    deck outside the MCP tool loop (or the player, pasting a list they found
+    elsewhere) can hand over the text directly instead of a structured
+    `cards` list. Reuses save_suggestion, so imported decks show up in the
+    same Deck Builder view as agent-generated ones, with the same validation,
+    wildcard cost, and Arena export.
+    """
+    cards = parse_arena_export(text)
+    if not cards:
+        raise ValueError(
+            "Could not parse any cards from that text. Expected lines like "
+            "'4 Lightning Bolt (STA) 42' or '4 Lightning Bolt', optionally "
+            "under 'Deck' / 'Sideboard' / 'Commander' headers."
+        )
+    return save_suggestion(
+        conn, name, fmt, cards, rationale or "Imported decklist", based_on_deck
+    )
 
 
 def list_suggestions(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, Any]]:

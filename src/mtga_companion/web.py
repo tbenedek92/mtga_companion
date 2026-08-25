@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def _int(request: Request, name: str, default: int) -> int:
+def _int(request: Request, name: str, default: int | None) -> int | None:
     try:
         return int(request.query_params.get(name, default))
     except (TypeError, ValueError):
@@ -189,18 +189,51 @@ def register(mcp: Any, db: Callable[[], Any]) -> None:
             return JSONResponse({"error": "not found"}, status_code=404)
         return ok(found)
 
+    @mcp.custom_route("/api/import-deck", methods=["POST"])
+    async def api_import_deck(request: Request) -> Response:
+        """Paste an Arena-format decklist to save it, without going through
+        an agent at all -- for a list found elsewhere, or a recommendation an
+        agent gave in chat without calling the MCP tools directly."""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "expected a JSON body"}, status_code=400)
+
+        text = (body.get("text") or "").strip()
+        name = (body.get("name") or "").strip()
+        if not text or not name:
+            return JSONResponse(
+                {"error": "both 'text' and 'name' are required"}, status_code=400
+            )
+        try:
+            saved = deckbuilder.import_deck(
+                db(), text, name,
+                fmt=body.get("format", "standard"),
+                rationale=body.get("rationale"),
+                based_on_deck=body.get("based_on_deck"),
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return ok(saved)
+
     @mcp.custom_route("/api/brief", methods=["GET"])
     async def api_brief(request: Request) -> Response:
         """The deck-building brief to hand an agent.
 
         The GUI does not call a model. It assembles the constraints -- format,
-        colors, the player's real wildcard stock -- so the agent has them
-        without the player retyping anything.
+        colors, the player's real wildcard stock, and an optional wildcard
+        spending budget -- so the agent has them without the player retyping
+        anything.
         """
         conn = db()
         fmt = request.query_params.get("format", "standard")
         colors = _param(request, "colors")
         strategy = request.query_params.get("strategy", "").strip()
+        budget = {
+            rarity: _int(request, f"max_{rarity}", None)
+            for rarity in ("common", "uncommon", "rare", "mythic")
+        }
+        budget = {k: v for k, v in budget.items() if v is not None}
         try:
             pool = deckbuilder.candidate_pool(conn, fmt, colors)
         except ValueError as exc:
@@ -211,23 +244,42 @@ def register(mcp: Any, db: Callable[[], Any]) -> None:
             "common": inv.get("wc_common"), "uncommon": inv.get("wc_uncommon"),
             "rare": inv.get("wc_rare"), "mythic": inv.get("wc_mythic"),
         }
+        has_exact = conn.execute(
+            "SELECT 1 FROM card_ownership WHERE source IN ('import', 'memory') LIMIT 1"
+        ).fetchone()
         lines = [
             f"Build me a {fmt} deck" + (f" in {colors}" if colors else "") + ".",
             "",
             f"Use the mtga MCP server. My wildcard stock is {wildcards}.",
             f"I have {len(pool)} known-owned {fmt}-legal cards to work with.",
+        ]
+        if budget:
+            lines.append(
+                f"Wildcard budget for this deck: at most {budget}. Call "
+                "validate_deck with wildcard_budget=" + repr(budget) + " and "
+                "don't present or save anything where within_budget is false."
+            )
+        lines += [
             "",
             "Steps:",
             f"1. Call get_deck_candidates(format='{fmt}'"
             + (f", colors='{colors}'" if colors else "") + ") for my pool.",
             "2. Build a deck preferring cards I already own.",
             "3. You may suggest upgrades I don't own, but call validate_deck to "
-            "check legality and report the wildcard cost of each.",
-            "4. Finish by calling save_suggested_deck so it appears in my app.",
+            "check legality" + (", budget," if budget else "") + " and the "
+            "wildcard cost of each.",
+            "4. Finish by calling save_suggested_deck so it appears in my app. "
+            "Give me its arena_export text verbatim -- it pastes directly into "
+            "Arena's deck importer.",
             "",
-            "Note: my collection is a LOWER BOUND (Arena stopped reporting "
-            "collection contents in 2021). A card missing from the pool may "
-            "still be owned - do not tell me I lack something on that basis.",
+            (
+                "Note: my collection was read from Arena's own memory (or an "
+                "exact import), so the pool above is complete, not a guess."
+                if has_exact else
+                "Note: my collection is a LOWER BOUND (Arena stopped reporting "
+                "collection contents in 2021). A card missing from the pool may "
+                "still be owned - do not tell me I lack something on that basis."
+            ),
         ]
         if strategy:
             lines[1:1] = ["", f"What I want: {strategy}"]
@@ -237,6 +289,7 @@ def register(mcp: Any, db: Callable[[], Any]) -> None:
             "colors": colors,
             "pool_size": len(pool),
             "wildcards": wildcards,
+            "wildcard_budget": budget or None,
         })
 
     log.info("Web UI registered at / (API under /api)")

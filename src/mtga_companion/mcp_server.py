@@ -238,7 +238,9 @@ def get_deck_candidates(
 
 @mcp.tool()
 def validate_deck(
-    cards: list[dict[str, Any]], format: str = "standard"
+    cards: list[dict[str, Any]],
+    format: str = "standard",
+    wildcard_budget: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Check a proposed decklist and report what it would cost to build.
 
@@ -246,10 +248,17 @@ def validate_deck(
         cards: [{"name": "Lightning Strike", "quantity": 4, "board": "main"}, ...]
             board is "main", "sideboard" or "commander" and defaults to main.
         format: The format to check legality against.
+        wildcard_budget: A self-imposed spending cap, e.g. {"rare": 1, "mythic": 0}
+            to build using at most 1 rare and 0 mythic wildcards for this deck --
+            distinct from `craftable_now` in wildcard_cost, which checks against
+            actual stock. Omit for no budget constraint.
 
     Returns every problem at once (size, the four-copy limit counted by card
     NAME, format legality, unknown names) plus the wildcard cost measured
-    against the player's actual stock. Call this before presenting a deck.
+    against the player's actual stock, and -- if wildcard_budget was given --
+    whether this build respects it. Call this before presenting a deck, and if
+    `within_budget` is false, cut the cards named in `over_budget`'s rarities
+    and try again rather than presenting an over-budget deck.
     """
     conn = db()
     try:
@@ -257,6 +266,9 @@ def validate_deck(
     except ValueError as exc:
         return {"error": str(exc)}
     result["wildcard_cost"] = builder_mod.wildcard_cost(conn, cards)
+    result["wildcard_budget_check"] = builder_mod.check_wildcard_budget(
+        result["wildcard_cost"], wildcard_budget
+    )
     result["arena_export"] = builder_mod.to_arena_export(conn, cards)
     return result
 
@@ -268,12 +280,14 @@ def save_suggested_deck(
     format: str = "standard",
     rationale: str | None = None,
     based_on_deck: str | None = None,
+    wildcard_budget: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Save a finished deck so it appears in the player's app.
 
-    Call this last. The suggestion shows up in the Deck Builder view with its
-    wildcard cost and an Arena-importable export, so the player can act on it
-    without copying anything out of the chat.
+    Call this last, once validate_deck confirms the deck is legal and (if a
+    budget was set) within it. The response includes `arena_export` -- give
+    that text to the player directly; it pastes straight into Arena's deck
+    importer, so they don't need the app open to use what you built.
 
     Args:
         name: A short name for the deck.
@@ -281,10 +295,47 @@ def save_suggested_deck(
         format: The format the deck is built for.
         rationale: Why this build -- shown to the player under the deck name.
         based_on_deck: deck_id, if this is a revision of an existing deck.
+        wildcard_budget: Same as validate_deck's -- re-checked and stored so
+            the player's app can show whether the saved deck respects it.
     """
     try:
         return builder_mod.save_suggestion(
-            db(), name, format, cards, rationale, based_on_deck
+            db(), name, format, cards, rationale, based_on_deck, wildcard_budget
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def import_deck(
+    text: str,
+    name: str,
+    format: str = "standard",
+    rationale: str | None = None,
+    based_on_deck: str | None = None,
+) -> dict[str, Any]:
+    """Parse an Arena-format decklist and save it, same as save_suggested_deck.
+
+    Use this when you (or the player) have a decklist as plain text rather
+    than a structured `cards` list -- e.g. a list pasted from a website, or one
+    you wrote out yourself instead of calling get_deck_candidates first.
+
+    Args:
+        text: Arena-importable decklist text, e.g.:
+            Deck
+            4 Lightning Bolt (STA) 42
+            20 Mountain
+
+            Sideboard
+            2 Negate
+        name: A short name for the deck.
+        format: The format the deck is built for.
+        rationale: Why this build. Defaults to "Imported decklist".
+        based_on_deck: deck_id, if this is a revision of an existing deck.
+    """
+    try:
+        return builder_mod.import_deck(
+            db(), text, name, format, rationale, based_on_deck
         )
     except ValueError as exc:
         return {"error": str(exc)}
@@ -309,26 +360,54 @@ def export_deck_arena(deck_id: str) -> dict[str, Any]:
     description="Build an MTG Arena deck from the player's own collection.",
 )
 def build_deck_prompt(
-    format: str = "standard", colors: str = "", strategy: str = ""
+    format: str = "standard",
+    colors: str = "",
+    strategy: str = "",
+    max_rare_wildcards: int | None = None,
+    max_mythic_wildcards: int | None = None,
+    max_uncommon_wildcards: int | None = None,
+    max_common_wildcards: int | None = None,
 ) -> str:
-    """The deck-building brief, with the player's real constraints filled in."""
+    """The deck-building brief, with the player's real constraints filled in.
+
+    The max_*_wildcards args set a spending budget for THIS deck -- separate
+    from wildcard stock, which get_deck_candidates already reports. Use these
+    when the player wants to keep a build cheap even though they could afford
+    more, e.g. "at most 1 rare wildcard".
+    """
     conn = db()
     inv = queries.get_inventory(conn) or {}
     wildcards = {
         "common": inv.get("wc_common"), "uncommon": inv.get("wc_uncommon"),
         "rare": inv.get("wc_rare"), "mythic": inv.get("wc_mythic"),
     }
+    budget = {
+        rarity: cap for rarity, cap in (
+            ("common", max_common_wildcards), ("uncommon", max_uncommon_wildcards),
+            ("rare", max_rare_wildcards), ("mythic", max_mythic_wildcards),
+        ) if cap is not None
+    }
+    budget_line = (
+        f"\n\nWildcard budget for this deck: at most {budget}. Pass this same "
+        "dict as wildcard_budget to validate_deck -- if within_budget comes back "
+        "false, cut cards from the rarities named in over_budget and re-check "
+        "before saving. Do not present or save a deck that exceeds this budget."
+        if budget else ""
+    )
     return (
         f"Build a {format} deck"
         + (f" in {colors}" if colors else "")
         + (f" that is {strategy}" if strategy else "")
         + ".\n\n"
-        f"The player's wildcard stock is {wildcards}.\n\n"
+        f"The player's wildcard stock is {wildcards}."
+        f"{budget_line}\n\n"
         "1. Call get_deck_candidates to see what they own.\n"
         "2. Prefer cards they already own. You may propose upgrades they do "
         "not own, but say what each costs in wildcards.\n"
-        "3. Call validate_deck to confirm legality and cost.\n"
-        "4. Call save_suggested_deck so the deck appears in their app.\n\n"
+        "3. Call validate_deck to confirm legality, cost, and budget.\n"
+        "4. Call save_suggested_deck so the deck appears in their app. Its "
+        "response includes arena_export -- give that text to the player "
+        "verbatim; it pastes directly into Arena's deck importer.\n\n"
         "Their collection is a LOWER BOUND: Arena stopped reporting collection "
         "contents in 2021. Do not tell them they lack a card merely because it "
         "is absent from the pool."

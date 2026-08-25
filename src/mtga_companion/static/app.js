@@ -219,9 +219,9 @@ async function viewDeckDetail(id) {
 
 /* ------------------------------------------------------- collection/cards */
 
-let filters = { q: '', colors: '', rarity: '', maxCmc: '' };
+let filters = { q: '', colors: '', rarity: '', maxCmc: '', ownedOnly: false };
 
-function filterBar(onChange, { showSearch = true } = {}) {
+function filterBar(onChange, { showSearch = true, showOwnedToggle = false } = {}) {
   const mk = (key, opts, label) => el('select', {
     onchange: (e) => { filters[key] = e.target.value; onChange(); },
   }, opts.map(([v, t]) =>
@@ -239,6 +239,12 @@ function filterBar(onChange, { showSearch = true } = {}) {
       ['uncommon', 'Uncommon'], ['common', 'Common']]),
     mk('maxCmc', [['', 'Any cost'], ['1', 'MV ≤ 1'], ['2', 'MV ≤ 2'],
       ['3', 'MV ≤ 3'], ['4', 'MV ≤ 4'], ['6', 'MV ≤ 6']]),
+    showOwnedToggle ? el('label', { style: 'display:flex;align-items:center;gap:6px' },
+      el('input', {
+        type: 'checkbox', ...(filters.ownedOnly ? { checked: 'checked' } : {}),
+        onchange: (e) => { filters.ownedOnly = e.target.checked; onChange(); },
+      }),
+      ' Owned only') : null,
     el('div', { class: 'spacer' }), displayToggle());
 }
 
@@ -266,19 +272,41 @@ async function viewCards() {
   if (filters.colors) qs.set('colors', filters.colors);
   if (filters.rarity) qs.set('rarity', filters.rarity);
   if (filters.maxCmc) qs.set('max_cmc', filters.maxCmc);
-  const data = await api(`/api/cards?${qs}`);
+  if (filters.ownedOnly) qs.set('owned_only', '1');
+  const [data, collectionMeta] = await Promise.all([
+    api(`/api/cards?${qs}`),
+    api('/api/collection?limit=1'),
+  ]);
 
   return el('div', {},
     el('h2', {}, 'Card search'),
-    filterBar(render),
+    filterBar(render, { showOwnedToggle: true }),
     el('div', { class: 'muted', style: 'margin-bottom:10px' },
-      `${data.count} of 21,004 Arena cards · owned counts are a lower bound`),
+      `${data.count} of 21,004 Arena cards · owned counts are `
+      + (collectionMeta.completeness === 'exact' ? 'exact' : 'a lower bound')),
     cardList(data.cards));
 }
 
 /* ---------------------------------------------------------- deck builder */
 
-let builder = { format: 'standard', colors: '', strategy: '', brief: null };
+let builder = {
+  format: 'standard', colors: '', strategy: '', brief: null,
+  wcBudget: { common: '', uncommon: '', rare: '', mythic: '' },
+  importName: '', importText: '', importError: null,
+};
+
+function wildcardBudgetInputs() {
+  return el('div', { style: 'margin-top:10px' },
+    el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:6px' },
+      'Wildcard budget for this deck (optional — leave blank for no limit):'),
+    el('div', { class: 'toolbar' }, ['common', 'uncommon', 'rare', 'mythic'].map((r) =>
+      el('label', { style: 'display:flex;align-items:center;gap:6px;font-size:12px' },
+        r, el('input', {
+          type: 'number', min: '0', style: 'width:56px',
+          value: builder.wcBudget[r],
+          onchange: (e) => { builder.wcBudget[r] = e.target.value; },
+        })))));
+}
 
 async function viewBuilder() {
   const suggestions = await api('/api/suggestions');
@@ -301,12 +329,16 @@ async function viewBuilder() {
       placeholder: 'What are you after? e.g. "aggressive, cheap curve, under 10 rares"',
       onchange: (e) => { builder.strategy = e.target.value; },
     }),
+    wildcardBudgetInputs(),
     el('button', {
       class: 'btn primary', style: 'margin-top:10px',
       onclick: async (e) => {
         const qs = new URLSearchParams({ format: builder.format });
         if (builder.colors) qs.set('colors', builder.colors);
         if (builder.strategy) qs.set('strategy', builder.strategy);
+        for (const [r, v] of Object.entries(builder.wcBudget)) {
+          if (v !== '') qs.set(`max_${r}`, v);
+        }
         builder.brief = await api(`/api/brief?${qs}`);
         render();
       },
@@ -315,7 +347,9 @@ async function viewBuilder() {
   if (builder.brief) {
     panel.append(
       el('div', { class: 'muted', style: 'margin:12px 0 6px' },
-        `${builder.brief.pool_size} known-owned legal cards in this pool`),
+        `${builder.brief.pool_size} known-owned legal cards in this pool`
+        + (builder.brief.wildcard_budget
+          ? ` · budget: ${JSON.stringify(builder.brief.wildcard_budget)}` : '')),
       el('pre', { class: 'export' }, builder.brief.brief),
       el('button', {
         class: 'btn', style: 'margin-top:8px',
@@ -326,32 +360,79 @@ async function viewBuilder() {
       }, 'Copy brief'));
   }
 
+  const importPanel = el('div', { class: 'panel' },
+    el('h3', {}, 'Import a decklist'),
+    el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:8px' },
+      'Paste a decklist in Arena\'s import format to save it here for later — '
+      + 'from an agent that answered in chat, or a list found elsewhere.'),
+    el('input', {
+      type: 'text', placeholder: 'Name for this deck', value: builder.importName,
+      style: 'width:100%;margin-bottom:8px;background:var(--panel-2);'
+        + 'border:1px solid var(--line);border-radius:8px;padding:7px 10px;color:inherit',
+      onchange: (e) => { builder.importName = e.target.value; },
+    }),
+    el('textarea', {
+      placeholder: 'Deck\n4 Lightning Bolt (STA) 42\n20 Mountain\n\nSideboard\n2 Negate',
+      onchange: (e) => { builder.importText = e.target.value; },
+    }),
+    builder.importError
+      ? el('div', { class: 'banner warn', style: 'margin-top:8px' }, builder.importError)
+      : null,
+    el('button', {
+      class: 'btn primary', style: 'margin-top:8px',
+      onclick: async (e) => {
+        if (!builder.importName || !builder.importText) {
+          builder.importError = 'Both a name and a decklist are required.';
+          render();
+          return;
+        }
+        const res = await fetch('/api/import-deck', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: builder.importName, text: builder.importText, format: builder.format,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          builder.importError = data.error || 'Import failed.';
+          render();
+          return;
+        }
+        builder.importName = ''; builder.importText = ''; builder.importError = null;
+        const full = await api(`/api/suggestions/${data.suggestion_id}`);
+        showSuggestion(full);
+      },
+    }, 'Import'));
+
   return el('div', {},
     el('h2', {}, 'Deck builder'),
     el('div', { class: 'banner' },
       'This app does not call a model. Generate a brief, run it in your MCP '
       + 'agent (Claude Code), and it will write the finished deck back here '
       + 'via save_suggested_deck.'),
-    el('div', { class: 'grid cols-2' }, panel,
-      el('div', { class: 'panel' },
-        el('h3', {}, 'Suggestions'),
-        suggestions.length === 0
-          ? el('div', { class: 'muted' }, 'None yet. Generate a brief and run it.')
-          : el('div', { class: 'decklist' }, suggestions.map((s) =>
-              el('div', {
-                class: 'deckrow clickable',
-                onclick: async () => {
-                  const full = await api(`/api/suggestions/${s.suggestion_id}`);
-                  showSuggestion(full);
-                },
+    el('div', { class: 'grid cols-2' }, panel, importPanel),
+    el('div', { class: 'panel', style: 'margin-top:14px' },
+      el('h3', {}, 'Suggestions'),
+      suggestions.length === 0
+        ? el('div', { class: 'muted' }, 'None yet. Generate a brief and run it, '
+            + 'or import a decklist.')
+        : el('div', { class: 'decklist' }, suggestions.map((s) =>
+            el('div', {
+              class: 'deckrow clickable',
+              onclick: async () => {
+                const full = await api(`/api/suggestions/${s.suggestion_id}`);
+                showSuggestion(full);
               },
-                el('span', { class: 'c' }, s.name),
-                el('span', { class: 'pill' }, s.format || '—')))))));
+            },
+              el('span', { class: 'c' }, s.name),
+              el('span', { class: 'pill' }, s.format || '—'))))));
 }
 
 function showSuggestion(s) {
   const cost = s.wildcard_cost || {};
   const needed = Object.entries(cost.wildcards_needed || {});
+  const budgetCheck = (s.validation || {}).wildcard_budget_check;
+
   main.replaceChildren(el('div', {},
     el('button', { class: 'btn', onclick: render }, '← Back'),
     el('h2', { style: 'margin-top:14px' }, s.name),
@@ -364,9 +445,23 @@ function showSuggestion(s) {
               el('div', {}, el('span', { class: `pill ${r}` }, `${n} ${r}`), ' needed')),
               el('div', { class: cost.craftable_now ? 'pill owned' : 'pill missing',
                 style: 'margin-top:8px' },
-                cost.craftable_now ? 'You can craft this now' : 'Not enough wildcards'))),
+                cost.craftable_now ? 'You can craft this now' : 'Not enough wildcards')),
+        budgetCheck && budgetCheck.budget_set
+          ? el('div', { class: budgetCheck.within_budget ? 'pill owned' : 'pill missing',
+              style: 'margin-top:6px' },
+              budgetCheck.within_budget
+                ? 'Within wildcard budget'
+                : `Over budget: ${JSON.stringify(budgetCheck.over_budget)}`)
+          : null),
       el('div', { class: 'panel' }, el('h3', {}, 'Arena export'),
-        el('pre', { class: 'export' }, s.arena_export || ''))),
+        el('pre', { class: 'export' }, s.arena_export || ''),
+        el('button', {
+          class: 'btn', style: 'margin-top:8px',
+          onclick: (e) => {
+            navigator.clipboard.writeText(s.arena_export || '');
+            e.target.textContent = 'Copied — paste into Arena';
+          },
+        }, 'Copy for Arena'))),
     el('h3', {}, 'Decklist'), cardList(s.cards || [])));
 }
 
