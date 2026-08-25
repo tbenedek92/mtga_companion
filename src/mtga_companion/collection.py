@@ -83,14 +83,26 @@ def _record(
 def deck_proven_ownership(conn: sqlite3.Connection) -> dict[int, int]:
     """arena_id -> max quantity provably owned, from decks the player built.
 
-    Excludes Arena's own precon/starter decks (see rebuild_inferred). This is
-    the anchor set memread.py validates a candidate memory region against: any
-    card here is independently known to be owned, at least at this quantity.
+    Excludes Arena's own precon/starter decks (see rebuild_inferred) and decks
+    still carrying Arena's own default name for a freshly pasted decklist --
+    "Imported Deck", "Imported Deck (2)", etc. Building a deck card-by-card
+    from your own binder can't add a card you don't own, but Arena's Import
+    feature (paste a decklist, e.g. this app's own "Copy for Arena" text) just
+    resolves names to entries regardless of ownership and flags what's missing
+    rather than blocking the paste -- so a deck the player never got around to
+    renaming after pasting a list is weak evidence, unlike everything else
+    they build. (Requiring the deck to have been PLAYED was tried and
+    rejected: most decks a player builds are never queued, so that filter
+    throws out real ownership evidence far more often than it catches a fake.)
+    This is the anchor set memread.py validates a candidate memory region
+    against: any card here is independently known to be owned, at least at
+    this quantity.
     """
     rows = conn.execute(
         "SELECT dc.arena_id, MAX(dc.quantity) AS q FROM deck_cards dc "
         "JOIN decks d ON d.deck_id = dc.deck_id "
-        "WHERE d.deck_kind = 'player' GROUP BY dc.arena_id"
+        "WHERE d.deck_kind = 'player' AND d.name NOT LIKE 'Imported Deck%' "
+        "GROUP BY dc.arena_id"
     )
     return {r["arena_id"]: r["q"] for r in rows}
 
@@ -109,10 +121,10 @@ def rebuild_inferred(conn: sqlite3.Connection) -> dict[str, int]:
     counts = {"deck": 0, "draft": 0, "played": 0, "grant": 0}
 
     # A deck listing N copies proves ownership of N copies -- but only if the
-    # player built it. Arena ships ~108 preconstructed and World Championship
-    # decks to every account and reports their full card lists in StartHook.
-    # Counting those inflated this table from 238 real cards to 2,394, and made
-    # the collection claim four Sheoldreds the player has never owned.
+    # player built it themselves rather than pasting an unrenamed list (see
+    # deck_proven_ownership's docstring). Arena also ships ~108 preconstructed
+    # and World Championship decks to every account and reports their full
+    # card lists in StartHook; those are excluded too.
     for arena_id, qty in deck_proven_ownership(conn).items():
         _record(conn, arena_id, "deck", qty, "lower_bound")
         counts["deck"] += 1

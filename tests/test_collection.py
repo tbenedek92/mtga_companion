@@ -42,6 +42,45 @@ def test_deck_membership_implies_ownership(conn):
     assert collection.owned_quantity(conn, 3) == (0, "unknown")
 
 
+def test_unrenamed_imported_deck_confers_no_ownership(conn):
+    """Arena names a deck "Imported Deck" (or "Imported Deck (2)", ...) when
+    you paste a decklist rather than building it from your own binder -- the
+    paste resolves names to entries regardless of ownership, flagging missing
+    cards rather than blocking them. A player who never renamed the result is
+    weak evidence, unlike a deck they built by hand."""
+    conn.executemany(
+        "INSERT INTO decks (deck_id, name, deck_kind) VALUES (?,?,'player')",
+        [("d2", "Imported Deck"), ("d3", "Imported Deck (2)")],
+    )
+    conn.executemany(
+        "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) VALUES (?,?,?,'main')",
+        [("d2", 1, 4), ("d3", 2, 4)],
+    )
+    conn.commit()
+
+    collection.rebuild_inferred(conn)
+
+    assert collection.owned_quantity(conn, 1) == (0, "unknown")
+    assert collection.owned_quantity(conn, 2) == (0, "unknown")
+
+
+def test_renaming_an_imported_deck_restores_ownership_evidence(conn):
+    """Once the player renames it, it's indistinguishable from any other deck
+    they built -- trust it the same way."""
+    conn.execute(
+        "INSERT INTO decks (deck_id, name, deck_kind) VALUES ('d2','My Burn Deck','player')"
+    )
+    conn.execute(
+        "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) "
+        "VALUES ('d2', 1, 4, 'main')"
+    )
+    conn.commit()
+
+    collection.rebuild_inferred(conn)
+
+    assert collection.owned_quantity(conn, 1) == (4, "lower_bound")
+
+
 def test_precon_decks_confer_no_ownership(conn):
     """Arena reports the contents of the ~108 decks it gives every account."""
     conn.execute(
