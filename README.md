@@ -176,6 +176,10 @@ the Deck Builder view with its wildcard cost and an Arena-importable export.
 | `save_suggested_deck` | Write the finished deck back to the app |
 | `import_deck` | Parse Arena-format decklist text and save it, same as above |
 | `export_deck_arena` | Arena import text for an existing deck |
+| `list_suggestions` | List saved suggestions — check before building something new |
+| `get_suggestion` | Full detail (cards, cost, notes) for one saved suggestion |
+| `update_suggestion_notes` | Set description/playstyle/comments/recommendations on a suggestion |
+| `duplicate_deck` | Clone a real deck or a suggestion into a new suggestion, to try a variant |
 
 There is also a `build_deck` MCP prompt carrying the same brief, with
 `format`/`colors`/`strategy`/`max_*_wildcards` arguments.
@@ -203,13 +207,36 @@ decklist as plain Arena-format text — from an agent that answered in chat
 without touching MCP, or a list found elsewhere — and `import_deck` parses,
 validates, and saves it the same way.
 
+**Revising a suggestion in place.** By default, `save_suggested_deck` and
+`import_deck` always insert a new suggestion. Pass the `suggestion_id` of an
+existing one (from `list_suggestions`) and they update it in place instead —
+name, cards, cost and validation are fully replaced, while `rationale` and
+`based_on_deck` are partial updates (omit to keep the old value). This is how
+an agent iterates on the same deck across a session without cluttering the
+Suggestions list with near-duplicates. Call `list_suggestions` before building
+something new to check whether you're already iterating on one.
+
+**Notes on suggestions**, same four fields as [deck notes](#deck-notes) below
+— description, playstyle, comments, recommendations — settable at save time
+(`save_suggested_deck`/`import_deck`) or edited later via
+`update_suggestion_notes`, or in the GUI's Notes panel on a suggestion's detail
+page. Same partial-update rule: omit a field to leave it, pass `""` to clear it.
+
+**Duplicating a deck.** `duplicate_deck(new_name, deck_id=...)` or
+`duplicate_deck(new_name, suggestion_id=...)` clones a real deck or an existing
+suggestion's cards into a brand-new suggestion — useful for starting a variant
+without losing the original. Notes are intentionally not copied, since the
+whole point is a fresh decklist to annotate. In the GUI, the "Duplicate" button
+on a suggestion's detail page does the same thing.
+
 ## Deck notes
 
-Each of your decks (not precons or agent suggestions) has four freeform
-fields you or an agent can fill in: **description** (what the deck's plan
-is), **playstyle** (e.g. "Aggro", "Midrange", "Control" — free text, no fixed
-list), **comments**, and **recommendations**. Edit them in the GUI's Notes
-panel on a deck's detail page, or via the `update_deck_notes` MCP tool.
+Each of your decks (not precons) has four freeform fields you or an agent can
+fill in: **description** (what the deck's plan is), **playstyle** (e.g.
+"Aggro", "Midrange", "Control" — free text, no fixed list), **comments**, and
+**recommendations**. Edit them in the GUI's Notes panel on a deck's detail
+page, or via the `update_deck_notes` MCP tool. Agent suggestions carry the
+same four fields — see [Notes on suggestions](#deck-builder) above.
 
 These are entirely ours — Arena has no concept of them, so they're never
 touched by log ingestion and survive every resync untouched. A natural agent

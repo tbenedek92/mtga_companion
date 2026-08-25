@@ -221,3 +221,114 @@ def test_deck_notes_rejects_non_json_body(client):
         headers={"Content-Type": "application/json"},
     )
     assert res.status_code == 400
+
+
+def test_suggestion_notes_endpoint_updates_and_returns_the_suggestion(client):
+    saved = client.post("/api/import-deck", json={
+        "name": "V1", "text": "Deck\n4 Lightning Bolt\n56 Mountain\n",
+        "format": "standard",
+    }).json()
+
+    res = client.post(f"/api/suggestions/{saved['suggestion_id']}/notes", json={
+        "playstyle": "Aggro", "description": "Cheap and fast.",
+    })
+    assert res.status_code == 200
+    body = res.json()
+    assert body["playstyle"] == "Aggro"
+    assert body["description"] == "Cheap and fast."
+
+    fetched = client.get(f"/api/suggestions/{saved['suggestion_id']}").json()
+    assert fetched["playstyle"] == "Aggro"
+
+
+def test_suggestion_notes_partial_update_preserves_other_fields(client):
+    saved = client.post("/api/import-deck", json={
+        "name": "V1", "text": "Deck\n60 Mountain\n", "format": "standard",
+    }).json()
+    sid = saved["suggestion_id"]
+
+    client.post(f"/api/suggestions/{sid}/notes", json={"comments": "First"})
+    client.post(f"/api/suggestions/{sid}/notes", json={"playstyle": "Control"})
+    fetched = client.get(f"/api/suggestions/{sid}").json()
+    assert fetched["comments"] == "First"
+    assert fetched["playstyle"] == "Control"
+
+
+def test_suggestion_notes_requires_at_least_one_field(client):
+    saved = client.post("/api/import-deck", json={
+        "name": "V1", "text": "Deck\n60 Mountain\n", "format": "standard",
+    }).json()
+    res = client.post(f"/api/suggestions/{saved['suggestion_id']}/notes", json={})
+    assert res.status_code == 400
+
+
+def test_suggestion_notes_unknown_id_is_400(client):
+    res = client.post("/api/suggestions/999/notes", json={"comments": "x"})
+    assert res.status_code == 400
+
+
+def test_suggestion_notes_bad_id_is_400(client):
+    res = client.post("/api/suggestions/notanumber/notes", json={"comments": "x"})
+    assert res.status_code == 400
+
+
+def test_suggestion_notes_rejects_non_json_body(client):
+    saved = client.post("/api/import-deck", json={
+        "name": "V1", "text": "Deck\n60 Mountain\n", "format": "standard",
+    }).json()
+    res = client.post(
+        f"/api/suggestions/{saved['suggestion_id']}/notes",
+        content=b"not json", headers={"Content-Type": "application/json"},
+    )
+    assert res.status_code == 400
+
+
+def test_import_deck_with_suggestion_id_revises_in_place(client):
+    first = client.post("/api/import-deck", json={
+        "name": "V1", "text": "Deck\n60 Mountain\n", "format": "standard",
+    }).json()
+    second = client.post("/api/import-deck", json={
+        "name": "V2", "text": "Deck\n4 Lightning Bolt\n56 Mountain\n",
+        "format": "standard", "suggestion_id": first["suggestion_id"],
+    }).json()
+    assert second["suggestion_id"] == first["suggestion_id"]
+    assert len(client.get("/api/suggestions").json()) == 1
+
+
+def test_duplicate_deck_from_real_deck(client):
+    res = client.post("/api/duplicate-deck", json={"new_name": "Burn Variant", "deck_id": "d1"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["name"] == "Burn Variant"
+
+    suggestions = client.get("/api/suggestions").json()
+    assert any(s["name"] == "Burn Variant" for s in suggestions)
+
+
+def test_duplicate_deck_from_suggestion(client):
+    saved = client.post("/api/import-deck", json={
+        "name": "Base", "text": "Deck\n60 Mountain\n", "format": "standard",
+    }).json()
+    res = client.post("/api/duplicate-deck", json={
+        "new_name": "Base Fork", "suggestion_id": saved["suggestion_id"],
+    })
+    assert res.status_code == 200
+    assert res.json()["suggestion_id"] != saved["suggestion_id"]
+
+
+def test_duplicate_deck_requires_new_name(client):
+    res = client.post("/api/duplicate-deck", json={"deck_id": "d1"})
+    assert res.status_code == 400
+
+
+def test_duplicate_deck_requires_exactly_one_source(client):
+    res = client.post("/api/duplicate-deck", json={"new_name": "X"})
+    assert res.status_code == 400
+
+
+def test_duplicate_deck_rejects_non_json_body(client):
+    res = client.post(
+        "/api/duplicate-deck", content=b"not json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert res.status_code == 400

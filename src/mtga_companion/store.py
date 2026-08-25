@@ -202,7 +202,14 @@ CREATE TABLE IF NOT EXISTS suggested_decks (
     rationale     TEXT,
     based_on_deck TEXT,
     wildcard_cost TEXT,
-    validation    TEXT
+    validation    TEXT,
+    -- Same annotation fields as decks.*; see the comment there. Set at save
+    -- time or edited later via update_suggestion_notes.
+    description      TEXT,
+    playstyle        TEXT,
+    comments          TEXT,
+    recommendations   TEXT,
+    notes_updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS suggested_deck_cards (
@@ -238,6 +245,11 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("decks", "comments", "TEXT"),
     ("decks", "recommendations", "TEXT"),
     ("decks", "notes_updated_at", "TEXT"),
+    ("suggested_decks", "description", "TEXT"),
+    ("suggested_decks", "playstyle", "TEXT"),
+    ("suggested_decks", "comments", "TEXT"),
+    ("suggested_decks", "recommendations", "TEXT"),
+    ("suggested_decks", "notes_updated_at", "TEXT"),
 )
 
 

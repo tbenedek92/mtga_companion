@@ -488,7 +488,67 @@ async function viewBuilder() {
               },
             },
               el('span', { class: 'c' }, s.name),
+              s.playstyle ? el('span', { class: 'pill' }, s.playstyle) : null,
               el('span', { class: 'pill' }, s.format || '—'))))));
+}
+
+let suggestionNotesDraft = null; // { suggestionId, description, playstyle, comments, recommendations }
+
+function suggestionNotesField(key, label, placeholder) {
+  return el('div', { style: 'margin-bottom:10px' },
+    el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:4px' }, label),
+    el('textarea', {
+      placeholder, style: 'min-height:52px',
+      onchange: (e) => { suggestionNotesDraft[key] = e.target.value; },
+    }, suggestionNotesDraft[key]));
+}
+
+function suggestionNotesPanel(s) {
+  if (!suggestionNotesDraft || suggestionNotesDraft.suggestionId !== s.suggestion_id) {
+    suggestionNotesDraft = {
+      suggestionId: s.suggestion_id,
+      description: s.description || '',
+      playstyle: s.playstyle || '',
+      comments: s.comments || '',
+      recommendations: s.recommendations || '',
+    };
+  }
+  return el('div', { class: 'panel', style: 'margin-bottom:18px' },
+    el('div', { style: 'display:flex;justify-content:space-between;align-items:baseline' },
+      el('h3', {}, 'Notes'),
+      s.notes_updated_at
+        ? el('span', { class: 'muted', style: 'font-size:11px' },
+            `updated ${s.notes_updated_at.slice(0, 16)}`)
+        : null),
+    el('div', { style: 'margin-bottom:10px' },
+      el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:4px' }, 'Playstyle'),
+      el('input', {
+        type: 'text', placeholder: 'e.g. Aggro, Midrange, Control',
+        value: suggestionNotesDraft.playstyle,
+        style: 'width:100%;background:var(--panel-2);border:1px solid var(--line);'
+          + 'border-radius:8px;padding:7px 10px;color:inherit',
+        onchange: (e) => { suggestionNotesDraft.playstyle = e.target.value; },
+      })),
+    suggestionNotesField('description', 'Description', "What this deck's plan is…"),
+    suggestionNotesField('comments', 'Comments', 'Free-form notes…'),
+    suggestionNotesField('recommendations', 'Recommendations', 'What to change or improve…'),
+    el('button', {
+      class: 'btn primary',
+      onclick: async (e) => {
+        const res = await fetch(`/api/suggestions/${s.suggestion_id}/notes`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            description: suggestionNotesDraft.description,
+            playstyle: suggestionNotesDraft.playstyle,
+            comments: suggestionNotesDraft.comments,
+            recommendations: suggestionNotesDraft.recommendations,
+          }),
+        });
+        const updated = await res.json();
+        e.target.textContent = res.ok ? 'Saved' : 'Failed to save';
+        if (res.ok) setTimeout(() => showSuggestion({ ...s, ...updated }), 500);
+      },
+    }, 'Save notes'));
 }
 
 function showSuggestion(s) {
@@ -497,7 +557,24 @@ function showSuggestion(s) {
   const budgetCheck = (s.validation || {}).wildcard_budget_check;
 
   main.replaceChildren(el('div', {},
-    el('button', { class: 'btn', onclick: render }, '← Back'),
+    el('div', { class: 'toolbar' },
+      el('button', { class: 'btn', onclick: render }, '← Back'),
+      el('div', { class: 'spacer' }),
+      el('button', {
+        class: 'btn',
+        onclick: async () => {
+          const newName = prompt('Name for the duplicate:', `${s.name} (copy)`);
+          if (!newName) return;
+          const res = await fetch('/api/duplicate-deck', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_name: newName, suggestion_id: s.suggestion_id }),
+          });
+          const data = await res.json();
+          if (!res.ok) { alert(data.error || 'Duplicate failed.'); return; }
+          const full = await api(`/api/suggestions/${data.suggestion_id}`);
+          showSuggestion(full);
+        },
+      }, 'Duplicate')),
     el('h2', { style: 'margin-top:14px' }, s.name),
     el('div', { class: 'muted', style: 'margin-bottom:12px' }, s.rationale || ''),
     el('div', { class: 'grid cols-2', style: 'margin-bottom:16px' },
@@ -525,6 +602,7 @@ function showSuggestion(s) {
             e.target.textContent = 'Copied — paste into Arena';
           },
         }, 'Copy for Arena'))),
+    suggestionNotesPanel(s),
     el('h3', {}, 'Decklist'), cardList(s.cards || [])));
 }
 

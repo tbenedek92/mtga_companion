@@ -390,6 +390,9 @@ def deck_to_cards(conn: sqlite3.Connection, deck_id: str) -> list[dict[str, Any]
     return [dict(r) for r in rows]
 
 
+_SUGGESTION_NOTE_FIELDS = ("description", "playstyle", "comments", "recommendations")
+
+
 def save_suggestion(
     conn: sqlite3.Connection,
     name: str,
@@ -398,27 +401,70 @@ def save_suggestion(
     rationale: str | None = None,
     based_on_deck: str | None = None,
     wildcard_budget: dict[str, int] | None = None,
+    description: str | None = None,
+    playstyle: str | None = None,
+    comments: str | None = None,
+    recommendations: str | None = None,
+    suggestion_id: int | None = None,
 ) -> dict[str, Any]:
-    """Persist an agent's suggestion so the GUI can render it.
+    """Persist a suggestion so the GUI can render it.
 
     `wildcard_budget`, if given, is re-checked and stored alongside the
     validation so the GUI can show "within budget" without the caller having
     to have called validate_deck first -- the two paths (validate then save,
     or just save) end up with the same stored record either way.
+
+    Pass `suggestion_id` to revise an existing suggestion in place -- its card
+    list and validation/cost are replaced -- instead of creating a new row.
+    Without it, every call creates a fresh suggestion, which piles up
+    near-duplicate entries if an agent iterates on a build across several
+    calls in one session; passing the id back on later calls avoids that.
+
+    description/playstyle/comments/recommendations use the same partial-update
+    semantics as update_suggestion_notes: a field left as None keeps its
+    previous value when revising (or stays unset when creating); pass an
+    empty string to clear one. rationale and based_on_deck follow the same
+    rule on a revision.
     """
     validation = validate_deck(conn, cards, fmt)
     cost = wildcard_cost(conn, cards)
     validation["wildcard_budget_check"] = check_wildcard_budget(cost, wildcard_budget)
     owned = owned_by_name(conn)
+    notes = (description, playstyle, comments, recommendations)
+    has_notes = any(v is not None for v in notes)
 
-    cur = conn.execute(
-        "INSERT INTO suggested_decks(created_at, name, format, rationale, "
-        "based_on_deck, wildcard_cost, validation) "
-        "VALUES(datetime('now'), ?, ?, ?, ?, ?, ?)",
-        (name, fmt, rationale, based_on_deck,
-         json.dumps(cost), json.dumps(validation)),
-    )
-    suggestion_id = cur.lastrowid
+    if suggestion_id is not None:
+        if conn.execute(
+            "SELECT 1 FROM suggested_decks WHERE suggestion_id = ?", (suggestion_id,)
+        ).fetchone() is None:
+            raise ValueError(f"No saved suggestion with id {suggestion_id!r} to update.")
+        conn.execute(
+            "UPDATE suggested_decks SET name = ?, format = ?, wildcard_cost = ?, "
+            "validation = ?, rationale = COALESCE(?, rationale), "
+            "based_on_deck = COALESCE(?, based_on_deck), "
+            "description = COALESCE(?, description), "
+            "playstyle = COALESCE(?, playstyle), "
+            "comments = COALESCE(?, comments), "
+            "recommendations = COALESCE(?, recommendations), "
+            "notes_updated_at = CASE WHEN ? THEN datetime('now') ELSE notes_updated_at END "
+            "WHERE suggestion_id = ?",
+            (name, fmt, json.dumps(cost), json.dumps(validation), rationale,
+             based_on_deck, *notes, has_notes, suggestion_id),
+        )
+        conn.execute(
+            "DELETE FROM suggested_deck_cards WHERE suggestion_id = ?", (suggestion_id,)
+        )
+    else:
+        cur = conn.execute(
+            "INSERT INTO suggested_decks(created_at, name, format, rationale, "
+            "based_on_deck, wildcard_cost, validation, description, playstyle, "
+            "comments, recommendations, notes_updated_at) "
+            "VALUES(datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "CASE WHEN ? THEN datetime('now') ELSE NULL END)",
+            (name, fmt, rationale, based_on_deck, json.dumps(cost),
+             json.dumps(validation), *notes, has_notes),
+        )
+        suggestion_id = cur.lastrowid
 
     for card in cards:
         card_name = card.get("name")
@@ -450,6 +496,92 @@ def save_suggestion(
     }
 
 
+def update_suggestion_notes(
+    conn: sqlite3.Connection,
+    suggestion_id: int,
+    description: str | None = None,
+    playstyle: str | None = None,
+    comments: str | None = None,
+    recommendations: str | None = None,
+) -> dict[str, Any]:
+    """Edit a saved suggestion's notes without touching its decklist.
+
+    Same partial-update rule as save_suggestion's notes fields: an omitted
+    field keeps its current value; pass an empty string to clear one. Use
+    save_suggestion(..., suggestion_id=...) instead when the cards themselves
+    are changing.
+    """
+    updates = {
+        field: value
+        for field, value in zip(_SUGGESTION_NOTE_FIELDS, (
+            description, playstyle, comments, recommendations
+        ))
+        if value is not None
+    }
+    if not updates:
+        raise ValueError(
+            "Provide at least one of description, playstyle, comments, "
+            "recommendations to update."
+        )
+    if conn.execute(
+        "SELECT 1 FROM suggested_decks WHERE suggestion_id = ?", (suggestion_id,)
+    ).fetchone() is None:
+        raise ValueError(f"No saved suggestion with id {suggestion_id!r}.")
+
+    set_clause = ", ".join(f"{field} = ?" for field in updates)
+    conn.execute(
+        f"UPDATE suggested_decks SET {set_clause}, notes_updated_at = datetime('now') "
+        "WHERE suggestion_id = ?",
+        (*updates.values(), suggestion_id),
+    )
+    conn.commit()
+    return get_suggestion(conn, suggestion_id)
+
+
+def duplicate_deck(
+    conn: sqlite3.Connection,
+    new_name: str,
+    deck_id: str | None = None,
+    suggestion_id: int | None = None,
+    fmt: str | None = None,
+) -> dict[str, Any]:
+    """Clone an existing deck -- one of the player's real Arena decks, or a
+    previously saved suggestion -- into a new saved suggestion.
+
+    Lets an agent (or the player) start a variant of a deck without retyping
+    its 60+ cards. Exactly one of deck_id / suggestion_id must be given. Notes
+    are not copied -- a duplicate is a fresh decklist to annotate, not a
+    clone of the original's commentary.
+    """
+    if (deck_id is None) == (suggestion_id is None):
+        raise ValueError("Provide exactly one of deck_id or suggestion_id.")
+
+    if deck_id is not None:
+        row = conn.execute(
+            "SELECT name, format FROM decks WHERE deck_id = ?", (deck_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"No deck with id {deck_id!r}.")
+        cards = deck_to_cards(conn, deck_id)
+        source_fmt, source_label, based_on = row["format"], row["name"], deck_id
+    else:
+        source = get_suggestion(conn, suggestion_id)
+        if source is None:
+            raise ValueError(f"No saved suggestion with id {suggestion_id!r}.")
+        cards = [
+            {"name": c["name"], "quantity": c["quantity"], "board": c["board"]}
+            for c in source["cards"]
+        ]
+        source_fmt = source["format"]
+        source_label = source["name"]
+        based_on = source.get("based_on_deck")
+
+    return save_suggestion(
+        conn, new_name, fmt or source_fmt or "standard", cards,
+        rationale=f"Duplicated from {source_label!r}.", based_on_deck=based_on,
+    )
+
+
 def import_deck(
     conn: sqlite3.Connection,
     text: str,
@@ -457,6 +589,11 @@ def import_deck(
     fmt: str = "standard",
     rationale: str | None = None,
     based_on_deck: str | None = None,
+    description: str | None = None,
+    playstyle: str | None = None,
+    comments: str | None = None,
+    recommendations: str | None = None,
+    suggestion_id: int | None = None,
 ) -> dict[str, Any]:
     """Parse Arena-format decklist text and save it like an agent suggestion.
 
@@ -465,7 +602,8 @@ def import_deck(
     elsewhere) can hand over the text directly instead of a structured
     `cards` list. Reuses save_suggestion, so imported decks show up in the
     same Deck Builder view as agent-generated ones, with the same validation,
-    wildcard cost, and Arena export.
+    wildcard cost, and Arena export -- including notes fields and the
+    `suggestion_id`-to-revise-in-place behavior.
     """
     cards = parse_arena_export(text)
     if not cards:
@@ -475,13 +613,16 @@ def import_deck(
             "under 'Deck' / 'Sideboard' / 'Commander' headers."
         )
     return save_suggestion(
-        conn, name, fmt, cards, rationale or "Imported decklist", based_on_deck
+        conn, name, fmt, cards, rationale or "Imported decklist", based_on_deck,
+        description=description, playstyle=playstyle, comments=comments,
+        recommendations=recommendations, suggestion_id=suggestion_id,
     )
 
 
 def list_suggestions(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT suggestion_id, created_at, name, format, rationale, based_on_deck "
+        "SELECT suggestion_id, created_at, name, format, rationale, based_on_deck, "
+        "playstyle, description "
         "FROM suggested_decks ORDER BY created_at DESC, suggestion_id DESC LIMIT ?",
         (limit,),
     )

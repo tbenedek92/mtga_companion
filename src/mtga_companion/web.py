@@ -212,6 +212,48 @@ def register(mcp: Any, db: Callable[[], Any]) -> None:
             return JSONResponse({"error": "not found"}, status_code=404)
         return ok(found)
 
+    @mcp.custom_route("/api/suggestions/{suggestion_id}/notes", methods=["POST"])
+    async def api_suggestion_notes(request: Request) -> Response:
+        """Set description/playstyle/comments/recommendations on a saved
+        suggestion, without touching its decklist."""
+        try:
+            key = int(request.path_params["suggestion_id"])
+        except ValueError:
+            return JSONResponse({"error": "bad id"}, status_code=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "expected a JSON body"}, status_code=400)
+        try:
+            updated = deckbuilder.update_suggestion_notes(
+                db(), key,
+                description=body.get("description"), playstyle=body.get("playstyle"),
+                comments=body.get("comments"), recommendations=body.get("recommendations"),
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return ok(updated)
+
+    @mcp.custom_route("/api/duplicate-deck", methods=["POST"])
+    async def api_duplicate_deck(request: Request) -> Response:
+        """Clone a real deck or a saved suggestion into a new suggestion."""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "expected a JSON body"}, status_code=400)
+        new_name = (body.get("new_name") or "").strip()
+        if not new_name:
+            return JSONResponse({"error": "'new_name' is required"}, status_code=400)
+        try:
+            saved = deckbuilder.duplicate_deck(
+                db(), new_name,
+                deck_id=body.get("deck_id"), suggestion_id=body.get("suggestion_id"),
+                fmt=body.get("format"),
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return ok(saved)
+
     @mcp.custom_route("/api/import-deck", methods=["POST"])
     async def api_import_deck(request: Request) -> Response:
         """Paste an Arena-format decklist to save it, without going through
@@ -234,6 +276,9 @@ def register(mcp: Any, db: Callable[[], Any]) -> None:
                 fmt=body.get("format", "standard"),
                 rationale=body.get("rationale"),
                 based_on_deck=body.get("based_on_deck"),
+                description=body.get("description"), playstyle=body.get("playstyle"),
+                comments=body.get("comments"), recommendations=body.get("recommendations"),
+                suggestion_id=body.get("suggestion_id"),
             )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)

@@ -317,6 +317,11 @@ def save_suggested_deck(
     rationale: str | None = None,
     based_on_deck: str | None = None,
     wildcard_budget: dict[str, int] | None = None,
+    description: str | None = None,
+    playstyle: str | None = None,
+    comments: str | None = None,
+    recommendations: str | None = None,
+    suggestion_id: int | None = None,
 ) -> dict[str, Any]:
     """Save a finished deck so it appears in the player's app.
 
@@ -333,10 +338,22 @@ def save_suggested_deck(
         based_on_deck: deck_id, if this is a revision of an existing deck.
         wildcard_budget: Same as validate_deck's -- re-checked and stored so
             the player's app can show whether the saved deck respects it.
+        description: What the deck's plan/concept is.
+        playstyle: e.g. "Aggro", "Midrange", "Control" -- free text.
+        comments: Free-form notes.
+        recommendations: What to change or improve about this build.
+        suggestion_id: Pass the id of a suggestion you saved earlier in THIS
+            session to revise it in place (its cards and cost are replaced)
+            instead of creating a new one. Without it, every call creates a
+            fresh saved deck -- use this when you're iterating on the same
+            build across several calls, so the player doesn't end up with a
+            pile of near-duplicate entries. Notes fields you omit keep their
+            previous value on a revision; pass "" to clear one.
     """
     try:
         return builder_mod.save_suggestion(
-            db(), name, format, cards, rationale, based_on_deck, wildcard_budget
+            db(), name, format, cards, rationale, based_on_deck, wildcard_budget,
+            description, playstyle, comments, recommendations, suggestion_id,
         )
     except ValueError as exc:
         return {"error": str(exc)}
@@ -349,6 +366,11 @@ def import_deck(
     format: str = "standard",
     rationale: str | None = None,
     based_on_deck: str | None = None,
+    description: str | None = None,
+    playstyle: str | None = None,
+    comments: str | None = None,
+    recommendations: str | None = None,
+    suggestion_id: int | None = None,
 ) -> dict[str, Any]:
     """Parse an Arena-format decklist and save it, same as save_suggested_deck.
 
@@ -368,13 +390,84 @@ def import_deck(
         format: The format the deck is built for.
         rationale: Why this build. Defaults to "Imported decklist".
         based_on_deck: deck_id, if this is a revision of an existing deck.
+        description, playstyle, comments, recommendations: Same as
+            save_suggested_deck's.
+        suggestion_id: Same as save_suggested_deck's -- revise an existing
+            saved deck's cards in place instead of creating a new one.
     """
     try:
         return builder_mod.import_deck(
-            db(), text, name, format, rationale, based_on_deck
+            db(), text, name, format, rationale, based_on_deck,
+            description, playstyle, comments, recommendations, suggestion_id,
         )
     except ValueError as exc:
         return {"error": str(exc)}
+
+
+@mcp.tool()
+def update_suggestion_notes(
+    suggestion_id: int,
+    description: str | None = None,
+    playstyle: str | None = None,
+    comments: str | None = None,
+    recommendations: str | None = None,
+) -> dict[str, Any]:
+    """Edit a saved suggestion's notes without touching its decklist.
+
+    Use save_suggested_deck(..., suggestion_id=...) instead when the cards
+    themselves are changing. Only fields you pass are changed -- an omitted
+    field keeps its current value; pass "" to clear one. At least one field
+    is required.
+    """
+    try:
+        return builder_mod.update_suggestion_notes(
+            db(), suggestion_id, description, playstyle, comments, recommendations
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def duplicate_deck(
+    new_name: str,
+    deck_id: str | None = None,
+    suggestion_id: int | None = None,
+    format: str | None = None,
+) -> dict[str, Any]:
+    """Clone an existing deck into a new saved suggestion, to start a variant
+    without retyping its decklist.
+
+    Exactly one of deck_id (one of the player's real Arena decks) or
+    suggestion_id (a previously saved suggestion) must be given. The clone's
+    notes start blank -- it's a fresh decklist to annotate, not a copy of the
+    original's commentary. Follow up with save_suggested_deck(...,
+    suggestion_id=<the new id>) to actually change the cards, or
+    update_suggestion_notes to annotate it.
+    """
+    try:
+        return builder_mod.duplicate_deck(db(), new_name, deck_id, suggestion_id, format)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def list_suggestions(limit: int = 20) -> list[dict[str, Any]]:
+    """List saved suggestions (agent-built or imported decks), newest first.
+
+    Check this before building something new -- if a similar deck already
+    exists, consider duplicate_deck or save_suggested_deck(...,
+    suggestion_id=...) to revise it instead of creating another one.
+    """
+    return builder_mod.list_suggestions(db(), limit=limit)
+
+
+@mcp.tool()
+def get_suggestion(suggestion_id: int) -> dict[str, Any]:
+    """Full detail for one saved suggestion: cards, notes, cost, Arena export."""
+    found = builder_mod.get_suggestion(db(), suggestion_id)
+    if found is None:
+        return {"error": f"No saved suggestion with id {suggestion_id!r}."}
+    return found
 
 
 @mcp.tool()

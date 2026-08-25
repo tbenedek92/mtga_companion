@@ -371,3 +371,174 @@ class TestSaveSuggestionWithBudget:
         saved = db.save_suggestion(conn, "Free", "standard", cards)
         full = db.get_suggestion(conn, saved["suggestion_id"])
         assert full["validation"]["wildcard_budget_check"]["budget_set"] is False
+
+
+class TestSaveSuggestionUpdateInPlace:
+    def test_passing_suggestion_id_revises_instead_of_duplicating(self, conn):
+        first = db.save_suggestion(
+            conn, "V1", "standard", [{"name": "Mountain", "quantity": 60, "board": "main"}]
+        )
+        second = db.save_suggestion(
+            conn, "V2", "standard",
+            [{"name": "Mountain", "quantity": 58, "board": "main"},
+             {"name": "Lightning Bolt", "quantity": 2, "board": "main"}],
+            suggestion_id=first["suggestion_id"],
+        )
+        assert second["suggestion_id"] == first["suggestion_id"]
+        assert len(db.list_suggestions(conn)) == 1
+
+        full = db.get_suggestion(conn, first["suggestion_id"])
+        assert full["name"] == "V2"
+        names = {c["name"] for c in full["cards"]}
+        assert names == {"Mountain", "Lightning Bolt"}
+
+    def test_stale_cards_are_removed_on_revision(self, conn):
+        """Cards dropped from the new list must not linger from the old one."""
+        first = db.save_suggestion(
+            conn, "V1", "standard",
+            [{"name": "Mountain", "quantity": 56, "board": "main"},
+             {"name": "Lightning Bolt", "quantity": 4, "board": "main"}],
+        )
+        db.save_suggestion(
+            conn, "V2", "standard",
+            [{"name": "Mountain", "quantity": 60, "board": "main"}],
+            suggestion_id=first["suggestion_id"],
+        )
+        full = db.get_suggestion(conn, first["suggestion_id"])
+        assert {c["name"] for c in full["cards"]} == {"Mountain"}
+
+    def test_notes_are_partial_updates_across_revisions(self, conn):
+        first = db.save_suggestion(
+            conn, "V1", "standard", [{"name": "Mountain", "quantity": 60}],
+            description="Original plan", playstyle="Aggro",
+        )
+        db.save_suggestion(
+            conn, "V1", "standard", [{"name": "Mountain", "quantity": 60}],
+            suggestion_id=first["suggestion_id"], comments="New note",
+        )
+        full = db.get_suggestion(conn, first["suggestion_id"])
+        assert full["description"] == "Original plan"  # untouched
+        assert full["playstyle"] == "Aggro"             # untouched
+        assert full["comments"] == "New note"
+
+    def test_updating_an_unknown_suggestion_id_raises(self, conn):
+        with pytest.raises(ValueError, match="No saved suggestion"):
+            db.save_suggestion(
+                conn, "X", "standard", [{"name": "Mountain", "quantity": 60}],
+                suggestion_id=999,
+            )
+
+    def test_rationale_and_based_on_deck_are_also_partial_on_revision(self, conn):
+        first = db.save_suggestion(
+            conn, "V1", "standard", [{"name": "Mountain", "quantity": 60}],
+            rationale="First reason",
+        )
+        db.save_suggestion(
+            conn, "V1", "standard", [{"name": "Mountain", "quantity": 60}],
+            suggestion_id=first["suggestion_id"],
+        )
+        full = db.get_suggestion(conn, first["suggestion_id"])
+        assert full["rationale"] == "First reason"
+
+
+class TestUpdateSuggestionNotes:
+    def test_updates_notes_without_touching_cards(self, conn):
+        saved = db.save_suggestion(
+            conn, "X", "standard", [{"name": "Mountain", "quantity": 60}]
+        )
+        updated = db.update_suggestion_notes(
+            conn, saved["suggestion_id"], recommendations="Add removal"
+        )
+        assert updated["recommendations"] == "Add removal"
+        assert len(updated["cards"]) == 1
+
+    def test_partial_update(self, conn):
+        saved = db.save_suggestion(
+            conn, "X", "standard", [{"name": "Mountain", "quantity": 60}],
+            description="A", playstyle="B",
+        )
+        db.update_suggestion_notes(conn, saved["suggestion_id"], comments="C")
+        full = db.get_suggestion(conn, saved["suggestion_id"])
+        assert (full["description"], full["playstyle"], full["comments"]) == ("A", "B", "C")
+
+    def test_no_fields_is_rejected(self, conn):
+        saved = db.save_suggestion(
+            conn, "X", "standard", [{"name": "Mountain", "quantity": 60}]
+        )
+        with pytest.raises(ValueError, match="at least one"):
+            db.update_suggestion_notes(conn, saved["suggestion_id"])
+
+    def test_unknown_suggestion_is_rejected(self, conn):
+        with pytest.raises(ValueError, match="No saved suggestion"):
+            db.update_suggestion_notes(conn, 999, comments="x")
+
+
+class TestDuplicateDeck:
+    def test_duplicate_from_a_real_deck(self, conn):
+        conn.execute(
+            "INSERT INTO decks (deck_id, name, format, deck_kind) "
+            "VALUES ('d1', 'Original', 'standard', 'player')"
+        )
+        conn.execute(
+            "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) "
+            "VALUES ('d1', 1, 4, 'main')"
+        )
+        conn.commit()
+
+        dup = db.duplicate_deck(conn, "Variant", deck_id="d1")
+        full = db.get_suggestion(conn, dup["suggestion_id"])
+        assert full["format"] == "standard"
+        assert full["cards"][0]["name"] == "Lightning Bolt"
+        assert "Original" in full["rationale"]
+
+    def test_duplicate_from_a_suggestion(self, conn):
+        original = db.save_suggestion(
+            conn, "Base", "standard", [{"name": "Mountain", "quantity": 60}]
+        )
+        dup = db.duplicate_deck(conn, "Fork", suggestion_id=original["suggestion_id"])
+        assert dup["suggestion_id"] != original["suggestion_id"]
+        assert len(db.list_suggestions(conn)) == 2
+
+    def test_notes_are_not_carried_over(self, conn):
+        original = db.save_suggestion(
+            conn, "Base", "standard", [{"name": "Mountain", "quantity": 60}],
+            description="Should not copy", playstyle="Control",
+        )
+        dup = db.duplicate_deck(conn, "Fork", suggestion_id=original["suggestion_id"])
+        full = db.get_suggestion(conn, dup["suggestion_id"])
+        assert full["description"] is None
+        assert full["playstyle"] is None
+
+    def test_requires_exactly_one_source(self, conn):
+        with pytest.raises(ValueError, match="exactly one"):
+            db.duplicate_deck(conn, "X")
+        with pytest.raises(ValueError, match="exactly one"):
+            db.duplicate_deck(conn, "X", deck_id="d1", suggestion_id=1)
+
+    def test_unknown_deck_id_is_rejected(self, conn):
+        with pytest.raises(ValueError, match="No deck"):
+            db.duplicate_deck(conn, "X", deck_id="nope")
+
+    def test_unknown_suggestion_id_is_rejected(self, conn):
+        with pytest.raises(ValueError, match="No saved suggestion"):
+            db.duplicate_deck(conn, "X", suggestion_id=999)
+
+    def test_format_can_be_overridden(self, conn):
+        conn.execute(
+            "INSERT INTO decks (deck_id, name, format, deck_kind) "
+            "VALUES ('d1', 'Original', 'standard', 'player')"
+        )
+        conn.commit()
+        dup = db.duplicate_deck(conn, "Variant", deck_id="d1", fmt="historic")
+        assert db.get_suggestion(conn, dup["suggestion_id"])["format"] == "historic"
+
+
+class TestListSuggestionsIncludesPreview:
+    def test_playstyle_and_description_are_listed(self, conn):
+        db.save_suggestion(
+            conn, "X", "standard", [{"name": "Mountain", "quantity": 60}],
+            playstyle="Aggro", description="Fast deck",
+        )
+        listed = db.list_suggestions(conn)[0]
+        assert listed["playstyle"] == "Aggro"
+        assert listed["description"] == "Fast deck"
