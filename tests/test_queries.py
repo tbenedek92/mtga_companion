@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from mtga_companion import queries, store
@@ -181,3 +183,62 @@ def test_status_has_no_action_when_logging_enabled(conn, monkeypatch):
     monkeypatch.setattr(__import__(
         "mtga_companion.paths", fromlist=["x"]), "detailed_logs_enabled", lambda: True)
     assert "action_required" not in queries.status(conn)
+
+
+class TestUpdateDeckNotes:
+    def test_sets_all_four_fields(self, conn):
+        updated = queries.update_deck_notes(
+            conn, "d1",
+            description="Cheap aggro plan.", playstyle="Aggro",
+            comments="Won 3 straight.", recommendations="Add more removal.",
+        )
+        assert updated["description"] == "Cheap aggro plan."
+        assert updated["playstyle"] == "Aggro"
+        assert updated["comments"] == "Won 3 straight."
+        assert updated["recommendations"] == "Add more removal."
+        assert updated["notes_updated_at"] is not None
+
+    def test_partial_update_leaves_other_fields_untouched(self, conn):
+        queries.update_deck_notes(conn, "d1", description="Original", playstyle="Aggro")
+        updated = queries.update_deck_notes(conn, "d1", comments="Just this")
+        assert updated["description"] == "Original"
+        assert updated["playstyle"] == "Aggro"
+        assert updated["comments"] == "Just this"
+
+    def test_empty_string_clears_a_field(self, conn):
+        queries.update_deck_notes(conn, "d1", description="Something")
+        updated = queries.update_deck_notes(conn, "d1", description="")
+        assert updated["description"] == ""
+
+    def test_no_fields_given_is_rejected(self, conn):
+        with pytest.raises(ValueError, match="at least one"):
+            queries.update_deck_notes(conn, "d1")
+
+    def test_unknown_deck_is_rejected(self, conn):
+        with pytest.raises(ValueError, match="No deck"):
+            queries.update_deck_notes(conn, "nope", description="x")
+
+    def test_notes_are_included_in_get_deck(self, conn):
+        queries.update_deck_notes(conn, "d1", playstyle="Control")
+        assert queries.get_deck(conn, "d1")["playstyle"] == "Control"
+
+    def test_notes_survive_a_deck_resync(self, conn):
+        """Regression guard: parse.py's UPSERT must never touch these columns."""
+        from mtga_companion import parse
+
+        queries.update_deck_notes(conn, "d1", comments="Do not lose me")
+        payload = {
+            "DeckSummaries": [{"DeckId": "d1", "Name": "Burn", "Attributes": []}],
+            "Decks": {"d1": {"MainDeck": [{"cardId": 1, "quantity": 4}]}},
+        }
+        p = parse.LogParser(conn)
+        p.feed("<== StartHook(x)")
+        p.feed(json.dumps(payload))
+
+        assert queries.get_deck(conn, "d1")["comments"] == "Do not lose me"
+
+    def test_playstyle_and_description_surface_in_list_decks(self, conn):
+        queries.update_deck_notes(conn, "d1", playstyle="Midrange", description="Value deck")
+        listed = queries.list_decks(conn)[0]
+        assert listed["playstyle"] == "Midrange"
+        assert listed["description"] == "Value deck"

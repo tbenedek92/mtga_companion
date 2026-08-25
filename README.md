@@ -18,6 +18,7 @@ or suspending the game process.
 - [CLI reference](#cli-reference)
 - [The web UI](#the-web-ui)
 - [Deck builder](#deck-builder)
+- [Deck notes](#deck-notes)
 - [MCP tools](#mcp-tools)
 - [About the collection](#about-the-collection)
 - [Card data](#card-data)
@@ -144,7 +145,9 @@ Served by `mtga-companion serve` at `http://127.0.0.1:8765/` (disable with
 - **Dashboard** — rank and season record, wildcards, gold/gems, vault progress,
   deck and collection totals.
 - **Decks** — your decks (Arena's ~108 precons are behind a toggle). Each opens
-  with its card list, mana curve, land count and an Arena export you can copy.
+  with its card list, mana curve, land count, an Arena export you can copy, and
+  an editable **Notes** panel (description, playstyle, comments,
+  recommendations) — see below.
 - **Collection** — known-owned cards with color, rarity and cost filters, and
   a banner stating whether this is your exact collection or a lower bound.
 - **Cards** — search all 21,000+ Arena cards with an owned count on each, and
@@ -200,6 +203,23 @@ decklist as plain Arena-format text — from an agent that answered in chat
 without touching MCP, or a list found elsewhere — and `import_deck` parses,
 validates, and saves it the same way.
 
+## Deck notes
+
+Each of your decks (not precons or agent suggestions) has four freeform
+fields you or an agent can fill in: **description** (what the deck's plan
+is), **playstyle** (e.g. "Aggro", "Midrange", "Control" — free text, no fixed
+list), **comments**, and **recommendations**. Edit them in the GUI's Notes
+panel on a deck's detail page, or via the `update_deck_notes` MCP tool.
+
+These are entirely ours — Arena has no concept of them, so they're never
+touched by log ingestion and survive every resync untouched. A natural agent
+workflow: call `get_deck_stats` to analyze a deck's curve and win rate, then
+`update_deck_notes(deck_id, recommendations="...")` to leave what it found for
+you to see next time you open the app, without asking again.
+
+Every field is a partial update — an omitted field keeps its current value;
+pass an empty string to clear one instead of omitting it.
+
 ## MCP tools
 
 Full list, beyond the deck builder above:
@@ -217,6 +237,7 @@ Full list, beyond the deck builder above:
 | `get_deck_stats` | Win rate, mana curve, land count, color spread |
 | `import_collection` | Load an exact collection CSV |
 | `refresh_cards` | Re-sync the card database |
+| `update_deck_notes` | Set description/playstyle/comments/recommendations on a deck |
 
 Resources: `mtga://decks/{deck_id}` and `mtga://cards/{arena_id}`.
 

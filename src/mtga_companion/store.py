@@ -56,7 +56,15 @@ CREATE TABLE IF NOT EXISTS decks (
     -- and preconstructed decks Arena ships in every StartHook payload.
     deck_kind    TEXT,
     is_favorite  INTEGER,
-    raw          TEXT
+    raw          TEXT,
+    -- Player- or agent-written annotations. Arena has no concept of these, so
+    -- they are never touched by log ingestion (_extract_decks only updates
+    -- the columns above) and survive every resync untouched.
+    description     TEXT,   -- what the deck's plan/concept is
+    playstyle       TEXT,   -- e.g. "Aggro", "Midrange", "Control", or free text
+    comments        TEXT,   -- free-form notes
+    recommendations TEXT,   -- what to change/improve, often agent-written
+    notes_updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS deck_cards (
@@ -225,6 +233,11 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("ranks", "constructed_lost", "INTEGER"),
     ("ranks", "limited_won", "INTEGER"),
     ("ranks", "limited_lost", "INTEGER"),
+    ("decks", "description", "TEXT"),
+    ("decks", "playstyle", "TEXT"),
+    ("decks", "comments", "TEXT"),
+    ("decks", "recommendations", "TEXT"),
+    ("decks", "notes_updated_at", "TEXT"),
 )
 
 

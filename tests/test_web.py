@@ -181,3 +181,43 @@ def test_import_deck_rejects_non_json_body(client):
         headers={"Content-Type": "application/json"},
     )
     assert res.status_code == 400
+
+
+def test_deck_notes_endpoint_updates_and_returns_the_deck(client):
+    res = client.post("/api/decks/d1/notes", json={
+        "playstyle": "Aggro", "description": "Cheap and fast.",
+    })
+    assert res.status_code == 200
+    body = res.json()
+    assert body["playstyle"] == "Aggro"
+    assert body["description"] == "Cheap and fast."
+
+    # Confirm it's the same data the deck detail endpoint would show.
+    deck = client.get("/api/decks/d1").json()
+    assert deck["playstyle"] == "Aggro"
+
+
+def test_deck_notes_partial_update_preserves_other_fields(client):
+    client.post("/api/decks/d1/notes", json={"comments": "First"})
+    client.post("/api/decks/d1/notes", json={"playstyle": "Control"})
+    deck = client.get("/api/decks/d1").json()
+    assert deck["comments"] == "First"
+    assert deck["playstyle"] == "Control"
+
+
+def test_deck_notes_requires_at_least_one_field(client):
+    res = client.post("/api/decks/d1/notes", json={})
+    assert res.status_code == 400
+
+
+def test_deck_notes_unknown_deck_is_400(client):
+    res = client.post("/api/decks/nope/notes", json={"comments": "x"})
+    assert res.status_code == 400
+
+
+def test_deck_notes_rejects_non_json_body(client):
+    res = client.post(
+        "/api/decks/d1/notes", content=b"not json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert res.status_code == 400

@@ -177,12 +177,74 @@ async function viewDecks() {
           },
             el('div', { style: 'display:flex;justify-content:space-between;gap:10px' },
               el('strong', {}, d.name || '(unnamed)'),
-              el('span', { class: `pill ${colorClass(d.colors)}` }, d.colors || '—')),
+              el('span', { style: 'display:flex;gap:6px' },
+                d.playstyle ? el('span', { class: 'pill' }, d.playstyle) : null,
+                el('span', { class: `pill ${colorClass(d.colors)}` }, d.colors || '—'))),
             el('div', { class: 'muted', style: 'margin-top:6px;font-size:12px' },
               `${d.format || 'no format'} · ${d.mainboard_size} cards`
               + (d.sideboard_size ? ` · ${d.sideboard_size} sideboard` : '')),
-            el('div', { class: 'muted', style: 'font-size:12px' },
+            d.description ? el('div', {
+              class: 'muted', style: 'font-size:12px;margin-top:4px;'
+                + 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap',
+            }, d.description) : null,
+            el('div', { class: 'muted', style: 'font-size:12px;margin-top:2px' },
               d.last_played ? `last played ${d.last_played.slice(0, 10)}` : 'never played')))));
+}
+
+let notesDraft = null; // { deckId, description, playstyle, comments, recommendations }
+
+function notesField(key, label, placeholder) {
+  return el('div', { style: 'margin-bottom:10px' },
+    el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:4px' }, label),
+    el('textarea', {
+      placeholder, style: 'min-height:52px',
+      onchange: (e) => { notesDraft[key] = e.target.value; },
+    }, notesDraft[key]));
+}
+
+function notesPanel(deck) {
+  if (!notesDraft || notesDraft.deckId !== deck.deck_id) {
+    notesDraft = {
+      deckId: deck.deck_id,
+      description: deck.description || '',
+      playstyle: deck.playstyle || '',
+      comments: deck.comments || '',
+      recommendations: deck.recommendations || '',
+    };
+  }
+  return el('div', { class: 'panel', style: 'margin-bottom:18px' },
+    el('div', { style: 'display:flex;justify-content:space-between;align-items:baseline' },
+      el('h3', {}, 'Notes'),
+      deck.notes_updated_at
+        ? el('span', { class: 'muted', style: 'font-size:11px' },
+            `updated ${deck.notes_updated_at.slice(0, 16)}`)
+        : null),
+    el('div', { style: 'margin-bottom:10px' },
+      el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:4px' }, 'Playstyle'),
+      el('input', {
+        type: 'text', placeholder: 'e.g. Aggro, Midrange, Control',
+        value: notesDraft.playstyle,
+        style: 'width:100%;background:var(--panel-2);border:1px solid var(--line);'
+          + 'border-radius:8px;padding:7px 10px;color:inherit',
+        onchange: (e) => { notesDraft.playstyle = e.target.value; },
+      })),
+    notesField('description', 'Description', "What this deck's plan is…"),
+    notesField('comments', 'Comments', 'Free-form notes…'),
+    notesField('recommendations', 'Recommendations', 'What to change or improve…'),
+    el('button', {
+      class: 'btn primary',
+      onclick: async (e) => {
+        const res = await fetch(`/api/decks/${encodeURIComponent(deck.deck_id)}/notes`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            description: notesDraft.description, playstyle: notesDraft.playstyle,
+            comments: notesDraft.comments, recommendations: notesDraft.recommendations,
+          }),
+        });
+        e.target.textContent = res.ok ? 'Saved' : 'Failed to save';
+        setTimeout(render, 500);
+      },
+    }, 'Save notes'));
 }
 
 async function viewDeckDetail(id) {
@@ -211,6 +273,7 @@ async function viewDeckDetail(id) {
             e.target.textContent = 'Copied';
           },
         }, 'Copy for Arena'))),
+    notesPanel(deck),
     boards.map(([label, cards]) =>
       el('div', { style: 'margin-bottom:18px' },
         el('h3', {}, `${label} (${cards.reduce((a, c) => a + c.quantity, 0)})`),

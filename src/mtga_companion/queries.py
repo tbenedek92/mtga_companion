@@ -30,6 +30,7 @@ def list_decks(
         """
         SELECT d.deck_id, d.name, d.format, d.colors, d.last_updated,
                d.last_played, d.is_valid, d.deck_kind, d.is_favorite,
+               d.description, d.playstyle,
                (SELECT COALESCE(SUM(quantity), 0) FROM deck_cards dc
                  WHERE dc.deck_id = d.deck_id AND dc.board = 'main') AS mainboard_size,
                (SELECT COALESCE(SUM(quantity), 0) FROM deck_cards dc
@@ -46,7 +47,8 @@ def list_decks(
 
 def get_deck(conn: sqlite3.Connection, deck_id: str) -> dict[str, Any] | None:
     deck = conn.execute(
-        "SELECT deck_id, name, format, colors, last_updated, last_played, is_valid "
+        "SELECT deck_id, name, format, colors, last_updated, last_played, is_valid, "
+        "description, playstyle, comments, recommendations, notes_updated_at "
         "FROM decks WHERE deck_id = ?",
         (deck_id,),
     ).fetchone()
@@ -88,6 +90,53 @@ def get_deck(conn: sqlite3.Connection, deck_id: str) -> dict[str, Any] | None:
         if extra not in ("main", "sideboard"):
             result[extra] = items
     return result
+
+
+_NOTE_FIELDS = ("description", "playstyle", "comments", "recommendations")
+
+
+def update_deck_notes(
+    conn: sqlite3.Connection,
+    deck_id: str,
+    description: str | None = None,
+    playstyle: str | None = None,
+    comments: str | None = None,
+    recommendations: str | None = None,
+) -> dict[str, Any]:
+    """Set player- or agent-written annotations on one of the player's decks.
+
+    Arena has no concept of these fields, so they live entirely in our own
+    database and are never touched by log ingestion -- re-syncing decks from
+    the log only ever updates name/format/cards, never these columns.
+
+    Partial update: a field left as None is unchanged, not cleared. To erase
+    a field, pass an empty string explicitly.
+    """
+    updates = {
+        field: value
+        for field, value in zip(
+            _NOTE_FIELDS, (description, playstyle, comments, recommendations)
+        )
+        if value is not None
+    }
+    if not updates:
+        raise ValueError(
+            "Provide at least one of description, playstyle, comments, "
+            "recommendations to update."
+        )
+    if conn.execute(
+        "SELECT 1 FROM decks WHERE deck_id = ?", (deck_id,)
+    ).fetchone() is None:
+        raise ValueError(f"No deck with id {deck_id!r}.")
+
+    set_clause = ", ".join(f"{field} = ?" for field in updates)
+    conn.execute(
+        f"UPDATE decks SET {set_clause}, notes_updated_at = datetime('now') "
+        "WHERE deck_id = ?",
+        (*updates.values(), deck_id),
+    )
+    conn.commit()
+    return get_deck(conn, deck_id)
 
 
 def search_cards(

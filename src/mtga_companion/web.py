@@ -104,6 +104,29 @@ def register(mcp: Any, db: Callable[[], Any]) -> None:
         )
         return ok(deck)
 
+    @mcp.custom_route("/api/decks/{deck_id}/notes", methods=["POST"])
+    async def api_deck_notes(request: Request) -> Response:
+        """Set description/playstyle/comments/recommendations on a deck.
+
+        Player- or agent-written; never touched by log ingestion. Only fields
+        present in the body are changed -- send an empty string to clear one.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "expected a JSON body"}, status_code=400)
+        try:
+            updated = queries.update_deck_notes(
+                db(), request.path_params["deck_id"],
+                description=body.get("description"),
+                playstyle=body.get("playstyle"),
+                comments=body.get("comments"),
+                recommendations=body.get("recommendations"),
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return ok(updated)
+
     @mcp.custom_route("/api/cards", methods=["GET"])
     async def api_cards(request: Request) -> Response:
         conn = db()

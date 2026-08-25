@@ -164,6 +164,42 @@ def get_deck_stats(deck_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def update_deck_notes(
+    deck_id: str,
+    description: str | None = None,
+    playstyle: str | None = None,
+    comments: str | None = None,
+    recommendations: str | None = None,
+) -> dict[str, Any]:
+    """Write notes on one of the player's decks: description, playstyle,
+    comments, recommendations.
+
+    These are your own annotations, not Arena's -- nothing here is touched by
+    re-syncing decks from the log, so they persist across sessions. A natural
+    use: call get_deck_stats to analyze a deck (curve, win rate), then write
+    what you found into `recommendations` so the player sees it next time they
+    open the app, without needing to ask again.
+
+    Args:
+        deck_id: From list_decks or get_deck.
+        description: What the deck's plan/concept is.
+        playstyle: e.g. "Aggro", "Midrange", "Control" -- free text, no fixed set.
+        comments: Free-form notes.
+        recommendations: What to change or improve.
+
+    Only fields you pass are changed -- an omitted field keeps its current
+    value. To erase a field, pass an empty string for it explicitly. At least
+    one field is required.
+    """
+    try:
+        return queries.update_deck_notes(
+            db(), deck_id, description, playstyle, comments, recommendations
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
 def import_collection(path: str) -> dict[str, Any]:
     """Import an exact collection CSV, replacing any previous import.
 
