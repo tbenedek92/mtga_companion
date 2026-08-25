@@ -1,80 +1,170 @@
 # mtga-companion
 
 A local MTG Arena companion. Tails Arena's log, keeps a card and deck database,
-and serves it all to AI agents over MCP so they can reason about your decks and
-suggest changes.
+reads your real collection out of the game's own memory, and serves all of it
+to AI agents over MCP — plus a browsable web UI — so you (or an agent) can look
+at your decks, build new ones from cards you own, and get something you can
+paste straight back into Arena.
 
-Everything runs on your machine. The MCP server binds to loopback only, and
-Arena itself is only ever read — the log is tailed, and Arena's card database is
-opened read-only.
+Everything runs on your machine, unauthenticated on loopback only. Arena is
+only ever read: the log is tailed, its card database is opened read-only, and
+the optional memory sync copies bytes out without writing to, injecting into,
+or suspending the game process.
 
-## Setup
+## Contents
+
+- [Quick start](#quick-start)
+- [Requirements](#requirements)
+- [CLI reference](#cli-reference)
+- [The web UI](#the-web-ui)
+- [Deck builder](#deck-builder)
+- [MCP tools](#mcp-tools)
+- [About the collection](#about-the-collection)
+- [Card data](#card-data)
+- [Log format notes](#log-format-notes)
+- [Design notes](#design-notes)
+- [Troubleshooting](#troubleshooting)
+- [Where things live](#where-things-live)
+- [Development](#development)
+
+## Quick start
 
 ```sh
+# 1. Install
 uv venv && uv pip install -e ".[dev]"
+
+# 2. In MTG Arena: Settings (gear) -> Account -> tick
+#    "Detailed Logs (Plugin Support)" -> restart Arena.
+#    Without this, Arena writes no game data at all.
+
+# 3. Build the card database (~1 min, downloads from Scryfall)
+mtga-companion sync-cards
+
+# 4. Read your decks, inventory and rank from the log
+mtga-companion ingest
+
+# 5. Check it worked
+mtga-companion status
+#   "detailed_logs_enabled": true
+#   "decks": <your deck count>, "cards": 21000+
+
+# 6. Start the app: web UI + MCP server on one port
+mtga-companion serve
 ```
 
-### Enable Arena's detailed logging (required)
+Open **<http://127.0.0.1:8765/>** for the dashboard, decks, collection and card
+search.
 
-By default Arena writes no game data at all. In MTG Arena:
-
-**Settings (gear) → Account → tick "Detailed Logs (Plugin Support)"**, then
-restart Arena.
-
-Check it took effect:
-
-```sh
-mtga-companion status     # "detailed_logs_enabled": true
-```
-
-Until this is on, card search works but decks, matches and collection stay empty.
-
-## Usage
-
-```sh
-mtga-companion sync-cards           # build the card database (~1 min, once a day)
-mtga-companion status               # what data is loaded
-mtga-companion ingest               # read new log lines once and exit
-mtga-companion serve                # MCP server + live log tailing
-mtga-companion import-collection FILE.csv
-```
-
-`serve` runs both surfaces on one port:
-
-- **Browser UI** — <http://127.0.0.1:8765/>
-- **MCP endpoint** — `http://127.0.0.1:8765/mcp`
-
-Register the MCP endpoint with Claude Code:
+To let an AI agent use it, register the MCP endpoint (in a separate terminal,
+while `serve` keeps running):
 
 ```sh
 claude mcp add --transport http mtga http://127.0.0.1:8765/mcp
 ```
 
-Use `--no-web` to run the MCP server alone.
+Then in Claude Code, try: *"What decks do I have, and what colors are they?"*
+— it should read your real decks back to you.
+
+### Get your exact collection (recommended, one extra step)
+
+Without this, `get_collection` only knows about cards seen in decks you've
+built — a real but incomplete lower bound. To read your actual collection
+straight out of Arena's memory (same trick Untapped's Companion uses), with
+Arena running:
+
+```sh
+sudo .venv/bin/python scripts/sync_collection.py
+```
+
+See [About the collection](#about-the-collection) for what this does and why
+it needs `sudo`. It's a snapshot — re-run it after opening boosters or
+crafting cards to keep it current.
+
+### Try the deck builder
+
+1. Open the **Deck Builder** tab, pick a format and colors, optionally set a
+   wildcard budget, click **Generate brief**, then **Copy brief**.
+2. Paste it into Claude Code (with the MCP server registered as above).
+3. The agent builds a deck from cards you own, checks it's legal and in
+   budget, and saves it — it'll appear back in the Deck Builder tab with a
+   wildcard cost and a **Copy for Arena** button that pastes directly into
+   Arena's deck importer.
+
+## Requirements
+
+- **macOS** with MTG Arena installed (Steam or standalone). The memory-sync
+  feature is macOS-specific; everything else has no OS-specific code but is
+  only tested on macOS.
+- **Python 3.10+** and [uv](https://docs.astral.sh/uv/) (or plain
+  `pip`/`venv` — see below).
+- Arena's own card database is read from the Steam install path by default; a
+  standalone (non-Steam) install path is also checked. See `paths.py` if
+  yours lives elsewhere.
+
+Without `uv`:
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+```
+
+Every command below assumes `.venv/bin/` is on your `PATH` (e.g. via
+`source .venv/bin/activate`) or is written with the explicit `.venv/bin/`
+prefix — both work identically.
+
+## CLI reference
+
+```sh
+mtga-companion status
+mtga-companion sync-cards [--force]
+mtga-companion ingest
+mtga-companion import-collection FILE.csv
+mtga-companion serve [--host HOST] [--port PORT] [--no-tail] [--no-web]
+```
+
+| Command | What it does |
+|---|---|
+| `status` | Prints what's loaded: card count, deck count, whether Arena's Detailed Logs are on, unparsed-event count. Run this first when something looks empty. |
+| `sync-cards` | Refreshes the card database from Scryfall (+ Arena's local DB as fallback). Cached for ~20h; `--force` bypasses that. |
+| `ingest` | Reads new lines from `Player.log` once and exits. `serve` does this continuously; use `ingest` for a one-off refresh without starting the server. |
+| `import-collection FILE.csv` | Loads an exact collection export (Name + Quantity columns, Set optional) as ground truth. |
+| `serve` | Runs the web UI and MCP server together, tailing the log live. `--no-web` serves MCP only; `--no-tail` skips log ingestion; `--host`/`--port` default to `127.0.0.1:8765`. |
+
+`sudo .venv/bin/python scripts/sync_collection.py` and
+`sudo .venv/bin/python scripts/scan_memory.py` are separate, root-requiring
+scripts — see [About the collection](#about-the-collection).
+
+Add `-v` before the subcommand for debug logging, e.g. `mtga-companion -v serve`.
 
 ## The web UI
+
+Served by `mtga-companion serve` at `http://127.0.0.1:8765/` (disable with
+`--no-web` if you only want the MCP endpoint).
 
 - **Dashboard** — rank and season record, wildcards, gold/gems, vault progress,
   deck and collection totals.
 - **Decks** — your decks (Arena's ~108 precons are behind a toggle). Each opens
-  with its card list, mana curve, land count and Arena export text.
-- **Collection** — known-owned cards with colour, rarity and cost filters.
-- **Cards** — search all 21,004 Arena cards with an owned count on each, and
+  with its card list, mana curve, land count and an Arena export you can copy.
+- **Collection** — known-owned cards with color, rarity and cost filters, and
+  a banner stating whether this is your exact collection or a lower bound.
+- **Cards** — search all 21,000+ Arena cards with an owned count on each, and
   an "Owned only" toggle to restrict the search to your collection.
-- **Deck Builder** — see below.
+- **Deck Builder** — generate a brief for an agent, set a wildcard budget,
+  paste in a decklist to save it, and review saved suggestions. See
+  [Deck builder](#deck-builder).
 
 Cards show as an image grid by default with a table toggle; the choice is
-remembered. Art is lazy-loaded from Scryfall, so the table view is also the
-offline view.
+remembered in your browser. Art is lazy-loaded from Scryfall, so the table
+view also works fully offline.
 
 ## Deck builder
 
-The app does not call a model. It prepares a brief carrying your real
-constraints — format, colours, wildcard stock, the size of your legal card pool
-— which you run in an MCP agent such as Claude Code. The agent works through
-these tools and finishes by calling `save_suggested_deck`, at which point the
-deck appears in the Deck Builder view with its wildcard cost and an
-Arena-importable export.
+The app does not call a model itself. It prepares a brief carrying your real
+constraints — format, colors, wildcard stock, an optional spending budget, the
+size of your legal card pool — which you run in an MCP agent such as Claude
+Code. The agent works through the tools below and finishes by calling
+`save_suggested_deck` (or `import_deck`), at which point the deck appears in
+the Deck Builder view with its wildcard cost and an Arena-importable export.
 
 | Tool | Purpose |
 |---|---|
@@ -84,21 +174,25 @@ Arena-importable export.
 | `import_deck` | Parse Arena-format decklist text and save it, same as above |
 | `export_deck_arena` | Arena import text for an existing deck |
 
-There is also a `build_deck` MCP prompt carrying the same brief.
+There is also a `build_deck` MCP prompt carrying the same brief, with
+`format`/`colors`/`strategy`/`max_*_wildcards` arguments.
 
 **Every path back to Arena is the same text format.** `validate_deck`,
 `save_suggested_deck`, `import_deck` and `export_deck_arena` all return
 `arena_export` — lines like `4 Lightning Bolt (STA) 42` under `Deck` /
 `Sideboard` / `Commander` headers, which Arena's own deck importer accepts
 directly. The GUI's "Copy for Arena" button on any deck or saved suggestion
-copies this text.
+copies this text; in MCP, ask the agent to give you the `arena_export` text
+and it'll paste straight into Arena even if you never open the GUI.
 
 **Wildcard budget.** Independent of what you can *afford* (wildcard stock,
-checked automatically), you can cap what an agent is allowed to *spend* on one
-deck — e.g. "at most 1 rare wildcard, 0 mythic." Set it in the GUI's Deck
-Builder panel before generating a brief, or pass `wildcard_budget` directly to
-`validate_deck`/`save_suggested_deck` (`{"rare": 1, "mythic": 0}`). A rarity
-left out of the budget means zero of that rarity is allowed, not unlimited.
+checked automatically against your real inventory), you can cap what an agent
+is allowed to *spend* on one deck — e.g. "at most 1 rare wildcard, 0 mythic."
+Set it in the GUI's Deck Builder panel before generating a brief, or pass
+`wildcard_budget` directly to `validate_deck`/`save_suggested_deck`
+(`{"rare": 1, "mythic": 0}`). A rarity left out of the budget means **zero** of
+that rarity is allowed, not unlimited — be explicit about every rarity you're
+willing to spend.
 
 **Two ways to get a deck into the app.** An agent can build one from scratch
 via the tool chain above, or you can hand it (or the GUI's import box) a
@@ -107,6 +201,8 @@ without touching MCP, or a list found elsewhere — and `import_deck` parses,
 validates, and saves it the same way.
 
 ## MCP tools
+
+Full list, beyond the deck builder above:
 
 | Tool | What it gives an agent |
 |---|---|
@@ -117,7 +213,7 @@ validates, and saves it the same way.
 | `get_collection` | Cards you're known to own, with a completeness flag |
 | `get_inventory` | Wildcards, gold, gems, vault progress |
 | `get_rank` | Constructed and limited rank |
-| `get_match_history` | Recent matches, optionally per deck |
+| `get_match_history` | Recent matches, optionally per deck (**unverified** — see below) |
 | `get_deck_stats` | Win rate, mana curve, land count, color spread |
 | `import_collection` | Load an exact collection CSV |
 | `refresh_cards` | Re-sync the card database |
@@ -202,7 +298,9 @@ Two sources, merged on Arena's `grpId`:
   possible.
 
 Coverage is currently 100% of Arena's primary non-token cards, with oracle text
-for all but ~0.2% (the newest digital-only printings).
+for all but ~0.2% (the newest digital-only printings). Run `sync-cards` again
+after a new set releases; it's cached for ~20 hours, so a same-day re-run needs
+`--force`.
 
 ## Log format notes
 
@@ -237,15 +335,67 @@ this format is usually described, and each one silently breaks a parser:
   being silently dropped. Check that table after a patch to spot format drift.
 - **Match and draft extractors are still unverified.** They are written from the
   documented format but no game or draft has been captured yet, so treat them as
-  provisional until `get_match_history` returns a real result.
+  provisional until `get_match_history` returns a real result. Play a match (or
+  draft), run `mtga-companion ingest`, then check the `raw_events` table for
+  rows with reason `no extractor matched` — those hold the real payloads needed
+  to correct the extractors.
 - **Ingestion is idempotent.** Everything upserts on Arena's own ids, and byte
   offsets are persisted per log file, so re-reading a log changes nothing.
 - **Arena rewrites `Player.log` on every launch.** The tailer detects the file
   shrinking and re-reads from the start; the previous session is backfilled from
   `Player-prev.log`.
 
+## Troubleshooting
+
+**`status` shows `"detailed_logs_enabled": false`, decks/matches are empty.**
+Arena isn't writing game data. Settings → Account → tick "Detailed Logs
+(Plugin Support)" → fully restart Arena → `mtga-companion ingest` again.
+
+**`sync-cards` fails to download, or the card table looks empty.**
+Needs network access to `api.scryfall.com` / `data.scryfall.io`. Check
+connectivity, then re-run with `--force` if it partially completed.
+
+**`serve` starts but decks/collection are empty in the UI.**
+Run `mtga-companion ingest` first (or start `serve` and wait — it tails
+continuously, so the data appears as soon as Arena writes it, typically within
+a few seconds of app launch).
+
+**`scripts/sync_collection.py` reports validation below the threshold and
+writes nothing.** Either the wrong memory region was found (rare), or you
+haven't built enough decks yet for a confident cross-check — the validation
+needs cards it can independently confirm you own. Run
+`scripts/scan_memory.py` to see every candidate region's numbers, and try
+again after building a couple more decks or opening the Collection screen in
+Arena.
+
+**`sudo: a password is required` / can't run the memory sync non-interactively.**
+That's expected — `sudo` needs an interactive terminal. Run the command
+directly in your own terminal rather than through a wrapper that can't prompt
+for a password.
+
+**MCP tools return data but it looks stale.** `get_collection`'s
+`completeness`/`caveat` fields say whether you're looking at an exact memory
+sync, an import, or inferred evidence, and how old a memory sync is. Re-run
+`sync_collection.py` or `ingest` as needed — nothing here auto-refreshes
+except the log tail while `serve` is running.
+
+**Port 8765 already in use.** `mtga-companion serve --port 8888` (also update
+the `claude mcp add` URL and your browser bookmark to match).
+
+## Where things live
+
+| What | Path |
+|---|---|
+| Our database | `~/.local/share/mtga_companion/db.sqlite` (override with `XDG_DATA_HOME`) |
+| Scryfall cache | `~/.local/share/mtga_companion/scryfall-cache/` |
+| Arena's log | `~/Library/Logs/Wizards Of The Coast/MTGA/Player.log` |
+| Arena's card DB (read-only fallback source) | `.../MTGA/MTGA_Data/Downloads/Raw/Raw_CardDatabase_*.mtga` |
+
 ## Development
 
 ```sh
 .venv/bin/python -m pytest tests/ -q
 ```
+
+158 tests, no network or root required (the memory-sync and Scryfall-sync code
+paths are exercised with synthetic data, not live calls).
