@@ -543,6 +543,78 @@ def build_deck_prompt(
     )
 
 
+@mcp.prompt(
+    name="improve_deck",
+    description="Analyze one of the player's existing decks and suggest improvements.",
+)
+def improve_deck_prompt(
+    deck_id: str,
+    focus: str = "",
+    max_rare_wildcards: int | None = None,
+    max_mythic_wildcards: int | None = None,
+    max_uncommon_wildcards: int | None = None,
+    max_common_wildcards: int | None = None,
+) -> str:
+    """The deck-improvement brief for an existing deck, with its real data filled in.
+
+    Unlike build_deck_prompt, which starts from a blank format/colors pair,
+    this starts FROM one of the player's own decks -- the agent reads its
+    current build and stats, then writes back either a short recommendation
+    or a full revised decklist, its choice depending on how much needs to
+    change.
+
+    The max_*_wildcards args cap what the agent may spend if it proposes a
+    revised build -- same meaning as in build_deck_prompt.
+    """
+    conn = db()
+    deck = queries.get_deck(conn, deck_id)
+    if deck is None:
+        return f"No deck with id {deck_id!r}. Call list_decks for valid ids."
+
+    budget = {
+        rarity: cap for rarity, cap in (
+            ("common", max_common_wildcards), ("uncommon", max_uncommon_wildcards),
+            ("rare", max_rare_wildcards), ("mythic", max_mythic_wildcards),
+        ) if cap is not None
+    }
+    budget_line = (
+        f"\n\nIf you propose a revised build, keep it within a wildcard budget "
+        f"of at most {budget}: pass this dict as wildcard_budget to "
+        "validate_deck, and if within_budget comes back false, cut cards from "
+        "the rarities named in over_budget before saving."
+        if budget else ""
+    )
+    fmt = deck.get("format") or "standard"
+    colors = deck.get("colors") or ""
+    return (
+        f"Analyze and suggest improvements for my deck {deck['name']!r} "
+        f"(deck_id={deck_id!r})."
+        + (f" What I want to focus on: {focus}." if focus else "")
+        + "\n\n"
+        f"1. Call get_deck({deck_id!r}) for its current mainboard and "
+        f"sideboard, and get_deck_stats({deck_id!r}) for its win rate, mana "
+        "curve, land count and color/type spread.\n"
+        f"2. Call get_deck_candidates(format={fmt!r}"
+        + (f", colors={colors!r}" if colors else "") + ", include_unowned=True) "
+        "to see cards -- owned or craftable -- that could replace weak slots.\n"
+        "3. Call validate_deck on anything you propose before presenting it."
+        f"{budget_line}\n\n"
+        "Then either:\n"
+        "- For a few targeted swaps or an observation (e.g. a curve problem, a "
+        "missing answer to a common threat), call update_deck_notes"
+        f"({deck_id!r}, recommendations='...') so the player sees it on this "
+        "deck next time they open the app -- their real deck is never edited "
+        "directly.\n"
+        "- For a substantially different 60, call save_suggested_deck(..., "
+        f"based_on_deck={deck_id!r}) so it's saved as a separate suggestion "
+        "the player can compare against the original, and give them its "
+        "arena_export text verbatim.\n\n"
+        "Their collection is a LOWER BOUND: Arena stopped reporting collection "
+        "contents in 2021. Do not tell them they lack a card merely because it "
+        "is absent from the pool."
+    )
+
+
 @mcp.resource("mtga://decks/{deck_id}")
 def deck_resource(deck_id: str) -> dict[str, Any]:
     """A single deck as a resource."""

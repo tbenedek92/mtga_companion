@@ -19,6 +19,7 @@ or suspending the game process.
 - [The web UI](#the-web-ui)
 - [Deck builder](#deck-builder)
 - [Deck notes](#deck-notes)
+- [Improving an existing deck](#improving-an-existing-deck)
 - [MCP tools](#mcp-tools)
 - [About the collection](#about-the-collection)
 - [Card data](#card-data)
@@ -182,7 +183,9 @@ the Deck Builder view with its wildcard cost and an Arena-importable export.
 | `duplicate_deck` | Clone a real deck or a suggestion into a new suggestion, to try a variant |
 
 There is also a `build_deck` MCP prompt carrying the same brief, with
-`format`/`colors`/`strategy`/`max_*_wildcards` arguments.
+`format`/`colors`/`strategy`/`max_*_wildcards` arguments. For improving one of
+your existing decks instead of building from scratch, see
+[Improving an existing deck](#improving-an-existing-deck) below.
 
 **Every path back to Arena is the same text format.** `validate_deck`,
 `save_suggested_deck`, `import_deck` and `export_deck_arena` all return
@@ -246,6 +249,29 @@ you to see next time you open the app, without asking again.
 
 Every field is a partial update — an omitted field keeps its current value;
 pass an empty string to clear one instead of omitting it.
+
+## Improving an existing deck
+
+Beyond building from scratch, an agent can read one of your real decks and
+suggest changes to it. The `improve_deck` MCP prompt (`deck_id`, optional
+`focus`, optional `max_*_wildcards`) fills in a brief that has the agent:
+
+1. Call `get_deck` and `get_deck_stats` to see the current build, win rate,
+   mana curve, and color/type spread.
+2. Call `get_deck_candidates` — scoped to the deck's own format and colors —
+   for cards, owned or craftable, that could replace weak slots.
+3. Call `validate_deck` on anything it proposes.
+
+Then it writes back one of two ways, its choice based on how much needs to
+change: a short note via `update_deck_notes(deck_id, recommendations="...")`
+for a few targeted swaps (your real deck is never edited directly — only its
+notes), or a full alternate 60 via `save_suggested_deck(..., based_on_deck=
+deck_id)` saved as a separate suggestion you can compare against the original.
+
+In the GUI, a deck's detail page has a "Suggest improvements" panel — optional
+focus text and wildcard budget, a "Generate brief" button, and a copy button —
+mirroring the Deck Builder's brief panel but scoped to that one deck. The same
+brief is available directly as `GET /api/decks/{deck_id}/improve-brief`.
 
 ## MCP tools
 

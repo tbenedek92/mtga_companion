@@ -332,3 +332,33 @@ def test_duplicate_deck_rejects_non_json_body(client):
         headers={"Content-Type": "application/json"},
     )
     assert res.status_code == 400
+
+
+def test_deck_improve_brief_includes_deck_and_steps(client):
+    data = client.get("/api/decks/d1/improve-brief").json()
+    assert data["deck_id"] == "d1"
+    assert data["deck_name"] == "Burn"
+    assert "d1" in data["brief"]
+    assert "update_deck_notes" in data["brief"]
+    assert "save_suggested_deck" in data["brief"]
+
+
+def test_deck_improve_brief_includes_focus_when_given(client):
+    data = client.get("/api/decks/d1/improve-brief?focus=beat+control").json()
+    assert "beat control" in data["brief"]
+
+
+def test_deck_improve_brief_includes_wildcard_budget_when_given(client):
+    data = client.get("/api/decks/d1/improve-brief?max_rare=1&max_mythic=0").json()
+    assert data["wildcard_budget"] == {"rare": 1, "mythic": 0}
+    assert "wildcard_budget" in data["brief"]
+
+
+def test_deck_improve_brief_omits_budget_language_when_not_given(client):
+    data = client.get("/api/decks/d1/improve-brief").json()
+    assert data["wildcard_budget"] is None
+
+
+def test_deck_improve_brief_unknown_deck_is_404(client):
+    res = client.get("/api/decks/nope/improve-brief")
+    assert res.status_code == 404

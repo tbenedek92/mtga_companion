@@ -360,4 +360,65 @@ def register(mcp: Any, db: Callable[[], Any]) -> None:
             "wildcard_budget": budget or None,
         })
 
+    @mcp.custom_route("/api/decks/{deck_id}/improve-brief", methods=["GET"])
+    async def api_deck_improve_brief(request: Request) -> Response:
+        """The deck-improvement brief for one existing deck, to hand an agent.
+
+        Mirrors /api/brief, but starts FROM a deck the player already has
+        instead of a blank format/colors pair.
+        """
+        conn = db()
+        deck_id = request.path_params["deck_id"]
+        deck = queries.get_deck(conn, deck_id)
+        if deck is None:
+            return JSONResponse({"error": f"No deck with id {deck_id!r}."}, status_code=404)
+
+        focus = request.query_params.get("focus", "").strip()
+        budget = {
+            rarity: _int(request, f"max_{rarity}", None)
+            for rarity in ("common", "uncommon", "rare", "mythic")
+        }
+        budget = {k: v for k, v in budget.items() if v is not None}
+        budget_line = (
+            f"\n\nIf you propose a revised build, keep it within a wildcard "
+            f"budget of at most {budget}: pass this dict as wildcard_budget to "
+            "validate_deck, and if within_budget comes back false, cut cards "
+            "from the rarities named in over_budget before saving."
+            if budget else ""
+        )
+        fmt = deck.get("format") or "standard"
+        colors = deck.get("colors") or ""
+        lines = [
+            f"Analyze and suggest improvements for my deck {deck['name']!r} "
+            f"(deck_id={deck_id!r}).",
+        ]
+        if focus:
+            lines.append(f"What I want to focus on: {focus}.")
+        lines += [
+            "",
+            "Use the mtga MCP server.",
+            f"1. Call get_deck({deck_id!r}) and get_deck_stats({deck_id!r}) to "
+            "see its current build, win rate, mana curve and color/type spread.",
+            f"2. Call get_deck_candidates(format={fmt!r}"
+            + (f", colors={colors!r}" if colors else "") + ", include_unowned=True) "
+            "for cards that could replace weak slots.",
+            "3. Call validate_deck on anything you propose." + budget_line,
+            "",
+            "Then either call update_deck_notes(...) with a short recommendation, "
+            f"or save_suggested_deck(..., based_on_deck={deck_id!r}) with a full "
+            "revised decklist -- whichever fits how much needs to change.",
+            "",
+            "My collection is a LOWER BOUND (Arena stopped reporting collection "
+            "contents in 2021) -- do not tell me I lack a card merely because "
+            "it's absent from the pool.",
+        ]
+        return ok({
+            "brief": "\n".join(lines),
+            "deck_id": deck_id,
+            "deck_name": deck["name"],
+            "format": fmt,
+            "colors": colors,
+            "wildcard_budget": budget or None,
+        })
+
     log.info("Web UI registered at / (API under /api)")

@@ -247,6 +247,54 @@ function notesPanel(deck) {
     }, 'Save notes'));
 }
 
+let improveState = null; // { deckId, focus, wcBudget, brief }
+
+function improveDeckPanel(deck) {
+  if (!improveState || improveState.deckId !== deck.deck_id) {
+    improveState = {
+      deckId: deck.deck_id, focus: '', brief: null,
+      wcBudget: { common: '', uncommon: '', rare: '', mythic: '' },
+    };
+  }
+  const panel = el('div', { class: 'panel', style: 'margin-bottom:18px' },
+    el('h3', {}, 'Suggest improvements'),
+    el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:8px' },
+      'Generates a brief for your MCP agent (Claude Code) to read this deck '
+      + 'and propose changes — a quick note or a full revised build, saved '
+      + 'back here without touching this deck.'),
+    el('textarea', {
+      placeholder: 'What to focus on (optional), e.g. "beat aggro" or "smooth the curve"',
+      onchange: (e) => { improveState.focus = e.target.value; },
+    }, improveState.focus),
+    wildcardBudgetInputs(improveState.wcBudget),
+    el('button', {
+      class: 'btn primary', style: 'margin-top:10px',
+      onclick: async (e) => {
+        const qs = new URLSearchParams();
+        if (improveState.focus) qs.set('focus', improveState.focus);
+        for (const [r, v] of Object.entries(improveState.wcBudget)) {
+          if (v !== '') qs.set(`max_${r}`, v);
+        }
+        improveState.brief = await api(
+          `/api/decks/${encodeURIComponent(deck.deck_id)}/improve-brief?${qs}`);
+        render();
+      },
+    }, 'Generate brief'));
+
+  if (improveState.brief) {
+    panel.append(
+      el('pre', { class: 'export', style: 'margin-top:10px' }, improveState.brief.brief),
+      el('button', {
+        class: 'btn', style: 'margin-top:8px',
+        onclick: (e) => {
+          navigator.clipboard.writeText(improveState.brief.brief);
+          e.target.textContent = 'Copied — paste into Claude Code';
+        },
+      }, 'Copy brief'));
+  }
+  return panel;
+}
+
 async function viewDeckDetail(id) {
   const deck = await api(`/api/decks/${encodeURIComponent(id)}`);
   const stats = deck.stats || {};
@@ -274,6 +322,7 @@ async function viewDeckDetail(id) {
           },
         }, 'Copy for Arena'))),
     notesPanel(deck),
+    improveDeckPanel(deck),
     boards.map(([label, cards]) =>
       el('div', { style: 'margin-bottom:18px' },
         el('h3', {}, `${label} (${cards.reduce((a, c) => a + c.quantity, 0)})`),
@@ -358,7 +407,7 @@ let builder = {
   importName: '', importText: '', importError: null,
 };
 
-function wildcardBudgetInputs() {
+function wildcardBudgetInputs(wcBudget) {
   return el('div', { style: 'margin-top:10px' },
     el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:6px' },
       'Wildcard budget for this deck (optional — leave blank for no limit):'),
@@ -366,8 +415,8 @@ function wildcardBudgetInputs() {
       el('label', { style: 'display:flex;align-items:center;gap:6px;font-size:12px' },
         r, el('input', {
           type: 'number', min: '0', style: 'width:56px',
-          value: builder.wcBudget[r],
-          onchange: (e) => { builder.wcBudget[r] = e.target.value; },
+          value: wcBudget[r],
+          onchange: (e) => { wcBudget[r] = e.target.value; },
         })))));
 }
 
@@ -392,7 +441,7 @@ async function viewBuilder() {
       placeholder: 'What are you after? e.g. "aggressive, cheap curve, under 10 rares"',
       onchange: (e) => { builder.strategy = e.target.value; },
     }),
-    wildcardBudgetInputs(),
+    wildcardBudgetInputs(builder.wcBudget),
     el('button', {
       class: 'btn primary', style: 'margin-top:10px',
       onclick: async (e) => {
