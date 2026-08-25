@@ -1,0 +1,26 @@
+[project]
+name = "mtga-companion"
+version = "0.1.0"
+description = "Local MTG Arena companion: tails the Arena log and exposes decks, matches and collection over MCP."
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.2.0",
+    "httpx>=0.27",
+    "numpy>=1.26",
+]
+
+[project.scripts]
+mtga-companion = "mtga_companion.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mtga_companion"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+
+# Contains account + Steam identifiers — never commit
+fixtures/*.log
+fixtures/*.json
+
+# Local caches and databases
+*.sqlite
+*.sqlite-journal
+scryfall-cache/
+scan_memory_results.json

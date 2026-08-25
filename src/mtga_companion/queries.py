@@ -1,0 +1,276 @@
+"""Read-side queries shared by the MCP tools and the CLI.
+
+Kept separate from the MCP layer so they can be tested without standing up a
+server.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections import Counter
+from typing import Any
+
+_CARD_FIELDS = (
+    "c.arena_id, c.name, c.mana_cost, c.cmc, c.colors, c.type_line, "
+    "c.oracle_text, c.rarity, c.set_code, c.image_uri"
+)
+
+
+def list_decks(
+    conn: sqlite3.Connection, include_precon: bool = False
+) -> list[dict[str, Any]]:
+    """Decks, player-built ones first.
+
+    Arena includes roughly 108 starter and preconstructed decks in every
+    StartHook payload. Returning them by default buries the dozen decks the
+    player actually built, so they are excluded unless asked for.
+    """
+    rows = conn.execute(
+        """
+        SELECT d.deck_id, d.name, d.format, d.colors, d.last_updated,
+               d.last_played, d.is_valid, d.deck_kind, d.is_favorite,
+               (SELECT COALESCE(SUM(quantity), 0) FROM deck_cards dc
+                 WHERE dc.deck_id = d.deck_id AND dc.board = 'main') AS mainboard_size,
+               (SELECT COALESCE(SUM(quantity), 0) FROM deck_cards dc
+                 WHERE dc.deck_id = d.deck_id AND dc.board = 'sideboard') AS sideboard_size
+        FROM decks d
+        WHERE ? OR d.deck_kind = 'player'
+        ORDER BY (d.deck_kind = 'player') DESC,
+                 COALESCE(d.last_played, d.last_updated) DESC, d.name
+        """,
+        (1 if include_precon else 0,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_deck(conn: sqlite3.Connection, deck_id: str) -> dict[str, Any] | None:
+    deck = conn.execute(
+        "SELECT deck_id, name, format, colors, last_updated, last_played, is_valid "
+        "FROM decks WHERE deck_id = ?",
+        (deck_id,),
+    ).fetchone()
+    if deck is None:
+        return None
+
+    # Summed per card *name*, not per arena_id. A deck can hold two printings
+    # of the same card (Arena gives each its own grpId), which would otherwise
+    # show up as "1x Shock" and "3x Shock" -- two entries an agent reads as two
+    # different cards rather than a playset.
+    cards = conn.execute(
+        f"""
+        SELECT dc.board, SUM(dc.quantity) AS quantity,
+               MIN(c.arena_id) AS arena_id, c.name, c.mana_cost, c.cmc,
+               c.colors, c.type_line, c.oracle_text, c.rarity, c.set_code,
+               c.image_uri, GROUP_CONCAT(dc.arena_id) AS printings
+        FROM deck_cards dc
+        LEFT JOIN cards c ON c.arena_id = dc.arena_id
+        WHERE dc.deck_id = ?
+        GROUP BY dc.board, COALESCE(c.name, dc.arena_id)
+        ORDER BY dc.board, c.cmc, c.name
+        """,
+        (deck_id,),
+    ).fetchall()
+
+    boards: dict[str, list[dict[str, Any]]] = {}
+    for row in cards:
+        entry = dict(row)
+        printings = (entry.pop("printings") or "").split(",")
+        # Only surface the extra grpIds when there actually are several.
+        if len(printings) > 1:
+            entry["printings"] = [int(x) for x in printings if x]
+        boards.setdefault(entry.pop("board"), []).append(entry)
+
+    result = dict(deck)
+    result["mainboard"] = boards.get("main", [])
+    result["sideboard"] = boards.get("sideboard", [])
+    for extra, items in boards.items():
+        if extra not in ("main", "sideboard"):
+            result[extra] = items
+    return result
+
+
+def search_cards(
+    conn: sqlite3.Connection,
+    query: str = "",
+    owned_only: bool = False,
+    colors: str | None = None,
+    rarity: str | None = None,
+    max_cmc: float | None = None,
+    limit: int = 50,
+    all_printings: bool = False,
+) -> list[dict[str, Any]]:
+    """Substring search over name and rules text, with the usual filters.
+
+    Collapsed to one row per card name by default. Arena assigns a distinct
+    grpId to every printing, so an un-collapsed search for "Sheoldred" returns
+    the same card several times and pushes genuinely different matches off the
+    end of the result -- wasteful for an agent and misleading for a human. Set
+    all_printings to see each grpId separately.
+    """
+    sql = [f"SELECT {_CARD_FIELDS} FROM cards c"]
+    if owned_only:
+        sql.append("JOIN card_ownership o ON o.arena_id = c.arena_id")
+    where, params = [], []
+    if query:
+        where.append("(c.name LIKE ? OR c.oracle_text LIKE ?)")
+        params += [f"%{query}%", f"%{query}%"]
+    if rarity:
+        where.append("c.rarity = ?")
+        params.append(rarity)
+    if max_cmc is not None:
+        where.append("c.cmc <= ?")
+        params.append(max_cmc)
+    if colors:
+        for ch in colors.upper():
+            if ch in "WUBRG":
+                where.append("c.colors LIKE ?")
+                params.append(f"%{ch}%")
+    if where:
+        sql.append("WHERE " + " AND ".join(where))
+    if all_printings:
+        sql.append("GROUP BY c.arena_id")
+    else:
+        # Prefer the printing that actually carries oracle text as the
+        # representative row; a bare fallback row would be the less useful pick.
+        sql.append("GROUP BY c.name HAVING c.oracle_text IS NOT NULL "
+                   "OR MAX(c.oracle_text IS NOT NULL) = 0")
+    sql.append("ORDER BY c.name LIMIT ?")
+    params.append(limit)
+    return [dict(r) for r in conn.execute("\n".join(sql), params)]
+
+
+def get_inventory(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT captured_at, gold, gems, wc_common, wc_uncommon, wc_rare, "
+        "wc_mythic, vault_progress FROM inventory ORDER BY captured_at DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_rank(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM ranks ORDER BY captured_at DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    out = dict(row)
+    out.pop("raw", None)
+    return out
+
+
+def get_match_history(
+    conn: sqlite3.Connection, limit: int = 20, deck_id: str | None = None
+) -> list[dict[str, Any]]:
+    sql = [
+        "SELECT m.match_id, m.started_at, m.ended_at, m.event_name, m.deck_id,",
+        "       d.name AS deck_name, m.opponent_name, m.opponent_colors,",
+        "       m.result, m.games_won, m.games_lost, m.on_play",
+        "FROM matches m LEFT JOIN decks d ON d.deck_id = m.deck_id",
+    ]
+    params: list[Any] = []
+    if deck_id:
+        sql.append("WHERE m.deck_id = ?")
+        params.append(deck_id)
+    sql.append("ORDER BY m.started_at DESC LIMIT ?")
+    params.append(limit)
+    return [dict(r) for r in conn.execute("\n".join(sql), params)]
+
+
+def get_deck_stats(conn: sqlite3.Connection, deck_id: str) -> dict[str, Any] | None:
+    deck = get_deck(conn, deck_id)
+    if deck is None:
+        return None
+
+    record = conn.execute(
+        "SELECT COUNT(*) AS played,"
+        " SUM(result = 'win') AS wins,"
+        " SUM(result = 'loss') AS losses,"
+        " SUM(result = 'draw') AS draws"
+        " FROM matches WHERE deck_id = ?",
+        (deck_id,),
+    ).fetchone()
+
+    played = record["played"] or 0
+    wins = record["wins"] or 0
+    losses = record["losses"] or 0
+
+    curve: Counter[int] = Counter()
+    colors: Counter[str] = Counter()
+    types: Counter[str] = Counter()
+    lands = 0
+    for card in deck["mainboard"]:
+        qty = card["quantity"]
+        type_line = card.get("type_line") or ""
+        if "Land" in type_line:
+            lands += qty
+        else:
+            # X spells and missing data both bucket at 0 rather than vanishing.
+            curve[int(card["cmc"] or 0)] += qty
+        for ch in (card.get("colors") or "").split(","):
+            if ch:
+                colors[ch] += qty
+        primary = type_line.split("—")[0].strip().split()
+        if primary:
+            types[primary[-1]] += qty
+
+    return {
+        "deck_id": deck_id,
+        "name": deck["name"],
+        "format": deck["format"],
+        "matches_played": played,
+        "wins": wins,
+        "losses": losses,
+        "draws": record["draws"] or 0,
+        "win_rate": round(wins / played, 3) if played else None,
+        "mainboard_size": sum(c["quantity"] for c in deck["mainboard"]),
+        "lands": lands,
+        "mana_curve": {str(k): curve[k] for k in sorted(curve)},
+        "color_distribution": dict(colors.most_common()),
+        "type_distribution": dict(types.most_common()),
+    }
+
+
+def status(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Health summary: what data we actually hold, and why it might be empty."""
+    from . import paths
+
+    def count(table: str) -> int:
+        return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+    detailed = paths.detailed_logs_enabled()
+    counts = {
+        "cards": count("cards"),
+        "decks": count("decks"),
+        "matches": count("matches"),
+        "draft_picks": count("draft_picks"),
+        "owned_cards": conn.execute(
+            "SELECT COUNT(DISTINCT arena_id) FROM card_ownership"
+        ).fetchone()[0],
+        "unparsed_events": count("raw_events"),
+    }
+    out: dict[str, Any] = {
+        "detailed_logs_enabled": detailed,
+        "log_path": str(paths.PLAYER_LOG),
+        "log_exists": paths.PLAYER_LOG.exists(),
+        **counts,
+    }
+    if detailed is False:
+        out["action_required"] = (
+            "MTG Arena is not writing game data. Enable Settings -> Account -> "
+            "'Detailed Logs (Plugin Support)' and restart Arena; decks, matches "
+            "and collection cannot be read until you do."
+        )
+
+    # Deck, inventory and rank parsing is verified against a real session;
+    # match and draft parsing has never seen a real payload. Say so rather than
+    # letting an empty match list read as "you have played no games".
+    out["unverified"] = ["match_history", "draft_picks"]
+    out["unverified_note"] = (
+        "Match and draft parsing is written from documentation, not from an "
+        "observed payload, and is deliberately deferred. An empty match history "
+        "means 'not yet captured', not 'no matches played'. To finish it: play a "
+        "match, run 'mtga-companion ingest', then check the raw_events table for "
+        "rows with reason 'no extractor matched'."
+    )
+    return out
