@@ -340,9 +340,8 @@ candidate region's numbers without writing anything, for troubleshooting.
   expected: Arena never wildcard-gates basics, so the game doesn't track a
   real count for them. `deckbuilder.py` already treats basics as free and
   unlimited everywhere.
-- An Arena-generated deck preview (e.g. an Alchemy upgrade suggestion) can list
-  more copies of a card than you've actually crafted. When memory and a deck
-  disagree, memory wins — see `collection.BEST_OWNERSHIP_SQL`.
+- Deck contents (below) are never evidence, even against memory — if a deck
+  disagrees with what memory read, memory wins unconditionally.
 
 ### Without a memory sync
 
@@ -352,10 +351,22 @@ candidate region's numbers without writing anything, for troubleshooting.
 |---|---|
 | `memory` | Read from Arena's own memory (above). Treated as exact. |
 | `import` | From an exact CSV. Also treated as exact. |
-| `deck` | In a deck **you built**. Arena's ~108 precons are excluded — it reports their contents to every account regardless of ownership. |
 | `grant` | Arena granted it while the tracker was running (booster, reward). |
 | `draft` | You picked it in a draft. |
 | `played` | You cast it in one of your own games. |
+
+**A deck's card list is deliberately not a source.** Arena's Import feature
+(pasting a decklist — including this app's own "Copy for Arena" text) lets you
+save a deck with cards you have not crafted; it flags them as missing rather
+than blocking the paste, and once you rename the deck away from Arena's
+default "Imported Deck" name it's indistinguishable from one built by hand.
+An earlier version of this app treated deck membership as ownership proof and
+inferred a false collection from it — including claiming cards from an
+AI-recommended deck the player had only partially crafted. There is no
+reliable per-deck signal left in Arena's log to tell "built from owned cards"
+apart from "pasted a list, renamed it" — so counting neither is the only
+option that never actively lies about what you own; import or sync from
+memory for anything a deck's contents alone can't tell you.
 
 Every `get_collection` response carries a `completeness` field, because an
 agent that reads a missing card as "you don't own it" will give bad advice.

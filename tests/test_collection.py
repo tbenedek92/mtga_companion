@@ -28,33 +28,22 @@ def conn(tmp_path):
     c.close()
 
 
-def test_deck_membership_implies_ownership(conn):
-    conn.executemany(
-        "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) VALUES (?,?,?,?)",
-        [("d1", 1, 4, "main"), ("d1", 2, 2, "sideboard")],
-    )
-    conn.commit()
-
-    collection.rebuild_inferred(conn)
-
-    assert collection.owned_quantity(conn, 1) == (4, "lower_bound")
-    assert collection.owned_quantity(conn, 2) == (2, "lower_bound")
-    assert collection.owned_quantity(conn, 3) == (0, "unknown")
-
-
-def test_unrenamed_imported_deck_confers_no_ownership(conn):
-    """Arena names a deck "Imported Deck" (or "Imported Deck (2)", ...) when
-    you paste a decklist rather than building it from your own binder -- the
-    paste resolves names to entries regardless of ownership, flagging missing
-    cards rather than blocking them. A player who never renamed the result is
-    weak evidence, unlike a deck they built by hand."""
+def test_deck_membership_confers_no_ownership(conn):
+    """Regression: a deck pasted via Arena's Import feature (e.g. this app's
+    own "Copy for Arena" text) can list cards the player never crafted --
+    Arena flags them as missing rather than blocking the paste. The deck is
+    then indistinguishable from one built by hand, and the player will
+    eventually rename it away from Arena's default "Imported Deck", so no
+    per-deck heuristic can tell a genuinely-owned deck from an aspirational
+    one. Deck contents are therefore never ownership evidence, regardless of
+    the deck's name or kind."""
     conn.executemany(
         "INSERT INTO decks (deck_id, name, deck_kind) VALUES (?,?,'player')",
-        [("d2", "Imported Deck"), ("d3", "Imported Deck (2)")],
+        [("d2", "Imported Deck"), ("d3", "Ghostlight Skies (Mono-White Auras)")],
     )
     conn.executemany(
-        "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) VALUES (?,?,?,'main')",
-        [("d2", 1, 4), ("d3", 2, 4)],
+        "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) VALUES (?,?,?,?)",
+        [("d1", 1, 4, "main"), ("d2", 2, 4, "main"), ("d3", 3, 4, "main")],
     )
     conn.commit()
 
@@ -62,39 +51,40 @@ def test_unrenamed_imported_deck_confers_no_ownership(conn):
 
     assert collection.owned_quantity(conn, 1) == (0, "unknown")
     assert collection.owned_quantity(conn, 2) == (0, "unknown")
-
-
-def test_renaming_an_imported_deck_restores_ownership_evidence(conn):
-    """Once the player renames it, it's indistinguishable from any other deck
-    they built -- trust it the same way."""
-    conn.execute(
-        "INSERT INTO decks (deck_id, name, deck_kind) VALUES ('d2','My Burn Deck','player')"
-    )
-    conn.execute(
-        "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) "
-        "VALUES ('d2', 1, 4, 'main')"
-    )
-    conn.commit()
-
-    collection.rebuild_inferred(conn)
-
-    assert collection.owned_quantity(conn, 1) == (4, "lower_bound")
-
-
-def test_precon_decks_confer_no_ownership(conn):
-    """Arena reports the contents of the ~108 decks it gives every account."""
-    conn.execute(
-        "INSERT INTO decks (deck_id, name, deck_kind) VALUES ('p1','Starter','precon')"
-    )
-    conn.execute(
-        "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) "
-        "VALUES ('p1', 3, 4, 'main')"
-    )
-    conn.commit()
-
-    collection.rebuild_inferred(conn)
-
     assert collection.owned_quantity(conn, 3) == (0, "unknown")
+
+
+def test_deck_proven_ownership_is_still_computed_for_memory_sync_anchors(conn):
+    """deck_proven_ownership is retired as a card_ownership source, but stays
+    around as a noisy anchor set memread.py uses to validate a candidate
+    memory region -- it must keep returning deck-derived numbers, it just
+    must never be wired back into rebuild_inferred."""
+    conn.execute(
+        "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) "
+        "VALUES ('d1', 1, 4, 'main')"
+    )
+    conn.commit()
+
+    assert collection.deck_proven_ownership(conn) == {1: 4}
+
+    collection.rebuild_inferred(conn)
+    assert collection.owned_quantity(conn, 1) == (0, "unknown")
+
+
+def test_deck_proven_ownership_excludes_precons_and_unrenamed_imports(conn):
+    """Cheap noise reduction for the anchor set, even though neither filter is
+    trustworthy enough to use for card_ownership itself."""
+    conn.executemany(
+        "INSERT INTO decks (deck_id, name, deck_kind) VALUES (?,?,?)",
+        [("p1", "Starter", "precon"), ("d2", "Imported Deck", "player")],
+    )
+    conn.executemany(
+        "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) VALUES (?,?,?,'main')",
+        [("p1", 2, 4), ("d2", 3, 4)],
+    )
+    conn.commit()
+
+    assert collection.deck_proven_ownership(conn) == {}
 
 
 def test_draft_picks_accumulate(conn):
@@ -127,9 +117,10 @@ def test_only_our_own_played_cards_count(conn):
 
 
 def test_highest_evidence_wins(conn):
-    conn.execute(
-        "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) "
-        "VALUES ('d1', 1, 4, 'main')"
+    conn.executemany(
+        "INSERT INTO draft_picks (draft_id, pack_number, pick_number, arena_id) "
+        "VALUES (?,?,?,?)",
+        [("dr1", 1, 1, 1), ("dr1", 1, 2, 1)],
     )
     conn.execute("INSERT INTO matches (match_id) VALUES ('m1')")
     conn.execute(
@@ -139,14 +130,14 @@ def test_highest_evidence_wins(conn):
 
     collection.rebuild_inferred(conn)
 
-    # Deck evidence (4) beats played evidence (1).
-    assert collection.owned_quantity(conn, 1) == (4, "lower_bound")
+    # Draft evidence (2) beats played evidence (1).
+    assert collection.owned_quantity(conn, 1) == (2, "lower_bound")
 
 
 def test_rebuild_is_idempotent(conn):
     conn.execute(
-        "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) "
-        "VALUES ('d1', 1, 4, 'main')"
+        "INSERT INTO draft_picks (draft_id, pack_number, pick_number, arena_id) "
+        "VALUES ('dr1', 1, 1, 1)"
     )
     conn.commit()
 
@@ -160,8 +151,8 @@ def test_rebuild_is_idempotent(conn):
 
 def test_collection_states_it_is_a_lower_bound(conn):
     conn.execute(
-        "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) "
-        "VALUES ('d1', 1, 4, 'main')"
+        "INSERT INTO draft_picks (draft_id, pack_number, pick_number, arena_id) "
+        "VALUES ('dr1', 1, 1, 1)"
     )
     conn.commit()
     collection.rebuild_inferred(conn)
@@ -175,8 +166,8 @@ def test_collection_states_it_is_a_lower_bound(conn):
 
 def test_import_overrides_inference_and_reports_exact(tmp_path, conn):
     conn.execute(
-        "INSERT INTO deck_cards (deck_id, arena_id, quantity, board) "
-        "VALUES ('d1', 1, 4, 'main')"
+        "INSERT INTO draft_picks (draft_id, pack_number, pick_number, arena_id) "
+        "VALUES ('dr1', 1, 1, 1)"
     )
     conn.commit()
     collection.rebuild_inferred(conn)
@@ -187,7 +178,7 @@ def test_import_overrides_inference_and_reports_exact(tmp_path, conn):
     result = collection.import_collection(conn, csv_file)
 
     assert result["imported"] == 2
-    # Exact import wins over the deck-derived lower bound of 4.
+    # Exact import wins over the drafted lower bound of 1.
     assert collection.owned_quantity(conn, 1) == (2, "exact")
     assert collection.get_collection(conn)["completeness"] == "exact"
 

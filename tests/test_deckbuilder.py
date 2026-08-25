@@ -51,10 +51,15 @@ class TestOwnership:
         own(conn, 2, 1)
         assert db.owned_by_name(conn)["Lightning Bolt"] == 4
 
-    def test_precon_decks_do_not_confer_ownership(self, conn):
+    def test_deck_membership_does_not_confer_ownership(self, conn):
         """Regression: Arena reports the contents of ~108 precon decks it gives
-        every account. Counting them claimed 2,394 owned cards where only 238
-        were real, including four Sheoldreds the player had never owned."""
+        every account; counting them once claimed 2,394 owned cards where only
+        238 were real, including four Sheoldreds the player had never owned.
+        A second regression (Arena's Import feature lets a player deck list
+        cards it never owned, flagged as missing rather than blocked, and the
+        deck is then indistinguishable from a hand-built one once renamed)
+        showed that even excluding precons wasn't enough -- so deck contents
+        are not ownership evidence at all, precon or player."""
         conn.execute(
             "INSERT INTO decks (deck_id, name, deck_kind) VALUES ('p1','WC Deck','precon')"
         )
@@ -70,7 +75,7 @@ class TestOwnership:
         collection.rebuild_inferred(conn)
         owned = db.owned_by_name(conn)
 
-        assert owned.get("Lightning Bolt") == 4
+        assert owned.get("Lightning Bolt") is None
         assert owned.get("Sheoldred") is None
 
 

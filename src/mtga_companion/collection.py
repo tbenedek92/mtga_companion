@@ -4,17 +4,29 @@ Arena stopped reporting collection contents when PlayerInventory.GetPlayerCardsV
 was removed in August 2021 and never replaced it. Everything here is therefore a
 *lower bound* derived from evidence in the log:
 
-    deck    you built a deck with N copies, so you own at least N
     draft   you picked the card, so you own at least the picked count
     played  you cast it in one of your own games, so you own at least one
     grant   Arena granted it while the tracker was running (booster, reward)
+
+A card's presence in one of your decks is deliberately NOT evidence here.
+Arena's Import feature lets you paste a decklist with cards you have not
+crafted -- it flags them as missing rather than blocking the paste -- and the
+resulting deck is then indistinguishable from one built by hand: you can
+rename it to anything, so no name- or metadata-based heuristic on the deck
+itself can tell the two apart. An earlier version of this module tried
+excluding decks still carrying Arena's default "Imported Deck" name, which
+works only until the player renames it -- which they always eventually do.
+`deck_proven_ownership` still exists, but only as a noisy anchor set for
+validating a candidate region during a memory sync (memread.py); it must never
+feed into card_ownership again.
 
 Absence from this table means "no evidence", never "you don't own it". Callers
 must not treat it as a complete collection -- the MCP layer says so explicitly
 in every response, because an agent that reads absence as non-ownership will
 recommend cards you already have and refuse ones you could play today.
 
-An exact collection CSV, when you have one, overrides all of the above.
+An exact collection CSV, or a memory sync (scripts/sync_collection.py), when
+you have one, overrides all of the above with real data instead of inference.
 """
 
 from __future__ import annotations
@@ -29,16 +41,14 @@ log = logging.getLogger(__name__)
 
 # Rows from an exact export beat anything we inferred.
 _SOURCE_PRECEDENCE = {
-    "import": 5, "memory": 4, "grant": 3, "deck": 2, "draft": 1, "played": 0,
+    "import": 5, "memory": 4, "grant": 3, "draft": 1, "played": 0,
 }
 
 # SQL form of the same ranking, for queries that must pick ONE row per
 # arena_id rather than blending numbers across sources. Blending with a plain
-# MAX(quantity) is the bug this exists to avoid: an Arena-generated Alchemy
-# preview deck can list more copies of a card than the player has actually
-# crafted (Arena lets you keep an "aspirational" deck list without owning
-# every card in it), so a MAX across sources silently inflates ownership
-# whenever such a deck's number happens to exceed a trustworthy source's.
+# MAX(quantity) is the bug this exists to avoid: two inferred sources can
+# disagree on a card's quantity, so a MAX across them would silently inflate
+# ownership whenever the less trustworthy one's number happens to be higher.
 # The fix is to always take the number from the single highest-precedence
 # source for that card, never to combine numbers across sources.
 _PRECEDENCE_CASE_SQL = """
@@ -46,7 +56,6 @@ _PRECEDENCE_CASE_SQL = """
         WHEN 'import' THEN 5
         WHEN 'memory' THEN 4
         WHEN 'grant' THEN 3
-        WHEN 'deck' THEN 2
         WHEN 'draft' THEN 1
         ELSE 0
     END
@@ -81,22 +90,20 @@ def _record(
 
 
 def deck_proven_ownership(conn: sqlite3.Connection) -> dict[int, int]:
-    """arena_id -> max quantity provably owned, from decks the player built.
+    """arena_id -> max quantity CLAIMED by a card's presence in a player deck.
 
-    Excludes Arena's own precon/starter decks (see rebuild_inferred) and decks
-    still carrying Arena's own default name for a freshly pasted decklist --
-    "Imported Deck", "Imported Deck (2)", etc. Building a deck card-by-card
-    from your own binder can't add a card you don't own, but Arena's Import
-    feature (paste a decklist, e.g. this app's own "Copy for Arena" text) just
-    resolves names to entries regardless of ownership and flags what's missing
-    rather than blocking the paste -- so a deck the player never got around to
-    renaming after pasting a list is weak evidence, unlike everything else
-    they build. (Requiring the deck to have been PLAYED was tried and
-    rejected: most decks a player builds are never queued, so that filter
-    throws out real ownership evidence far more often than it catches a fake.)
-    This is the anchor set memread.py validates a candidate memory region
-    against: any card here is independently known to be owned, at least at
-    this quantity.
+    NOT reliable enough to be actual ownership evidence -- see this module's
+    docstring for why deck membership was retired as a card_ownership source.
+    The only remaining caller is memread.py, which uses this purely as a noisy
+    anchor set to help pick out the right candidate region during a memory
+    sync: a wrong or unowned card here just lowers that scan's validated
+    fraction, it does not get written down as fact. Do not feed this into
+    card_ownership.
+
+    Still excludes Arena's own precon/starter decks, and decks still carrying
+    Arena's default "Imported Deck" name -- cheap noise reduction for the
+    anchor set even though neither filter is trustworthy enough for
+    card_ownership itself.
     """
     rows = conn.execute(
         "SELECT dc.arena_id, MAX(dc.quantity) AS q FROM deck_cards dc "
@@ -108,26 +115,19 @@ def deck_proven_ownership(conn: sqlite3.Connection) -> dict[int, int]:
 
 
 def rebuild_inferred(conn: sqlite3.Connection) -> dict[str, int]:
-    """Recompute the inferred ownership rows from decks, drafts and matches.
+    """Recompute the inferred ownership rows from drafts, grants and matches.
 
     Import rows are left untouched -- they are ground truth and this function
-    must never clobber them.
+    must never clobber them. Deck contents are deliberately NOT a source here
+    -- see this module's docstring for why, and deck_proven_ownership for the
+    one place deck-derived numbers are still allowed to matter.
     """
     # 'import' and 'memory' are ground truth (an exact export, or read
     # straight from the game's own memory) and must survive a rebuild of the
     # merely-inferred sources.
     conn.execute("DELETE FROM card_ownership WHERE source NOT IN ('import', 'memory')")
 
-    counts = {"deck": 0, "draft": 0, "played": 0, "grant": 0}
-
-    # A deck listing N copies proves ownership of N copies -- but only if the
-    # player built it themselves rather than pasting an unrenamed list (see
-    # deck_proven_ownership's docstring). Arena also ships ~108 preconstructed
-    # and World Championship decks to every account and reports their full
-    # card lists in StartHook; those are excluded too.
-    for arena_id, qty in deck_proven_ownership(conn).items():
-        _record(conn, arena_id, "deck", qty, "lower_bound")
-        counts["deck"] += 1
+    counts = {"draft": 0, "played": 0, "grant": 0}
 
     # Each draft pick is one physical copy; the same card picked twice is two.
     for row in conn.execute(
