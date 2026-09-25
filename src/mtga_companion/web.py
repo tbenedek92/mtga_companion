@@ -165,6 +165,25 @@ def register(mcp: Any, db: Callable[[], Any]) -> None:
     async def api_rank(request: Request) -> Response:
         return ok(queries.get_rank(db()) or {})
 
+    @mcp.custom_route("/api/matches", methods=["GET"])
+    async def api_matches(request: Request) -> Response:
+        matches = queries.get_match_history(
+            db(),
+            limit=_int(request, "limit", 20),
+            deck_id=_param(request, "deck_id"),
+        )
+        return ok({"matches": matches, "count": len(matches)})
+
+    @mcp.custom_route("/api/matches/{match_id}/plays", methods=["GET"])
+    async def api_match_plays(request: Request) -> Response:
+        plays = queries.get_match_plays(db(), request.path_params["match_id"])
+        return ok({"plays": plays, "count": len(plays)})
+
+    @mcp.custom_route("/api/matches/{match_id}/combat", methods=["GET"])
+    async def api_match_combat(request: Request) -> Response:
+        combat = queries.get_match_combat(db(), request.path_params["match_id"])
+        return ok({"combat": combat, "count": len(combat)})
+
     @mcp.custom_route("/api/summary", methods=["GET"])
     async def api_summary(request: Request) -> Response:
         """Everything the dashboard needs, in one round trip."""
@@ -303,7 +322,7 @@ def register(mcp: Any, db: Callable[[], Any]) -> None:
         }
         budget = {k: v for k, v in budget.items() if v is not None}
         try:
-            pool = deckbuilder.candidate_pool(conn, fmt, colors)
+            pool_size = deckbuilder.candidate_pool_size(conn, fmt, colors)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -319,7 +338,7 @@ def register(mcp: Any, db: Callable[[], Any]) -> None:
             f"Build me a {fmt} deck" + (f" in {colors}" if colors else "") + ".",
             "",
             f"Use the mtga MCP server. My wildcard stock is {wildcards}.",
-            f"I have {len(pool)} known-owned {fmt}-legal cards to work with.",
+            f"I have {pool_size} known-owned {fmt}-legal cards to work with.",
         ]
         if budget:
             lines.append(
@@ -355,7 +374,7 @@ def register(mcp: Any, db: Callable[[], Any]) -> None:
             "brief": "\n".join(lines),
             "format": fmt,
             "colors": colors,
-            "pool_size": len(pool),
+            "pool_size": pool_size,
             "wildcards": wildcards,
             "wildcard_budget": budget or None,
         })

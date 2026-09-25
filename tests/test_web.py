@@ -48,6 +48,27 @@ def client(tmp_path):
         "INSERT INTO inventory (captured_at, gold, gems, wc_common, wc_uncommon,"
         " wc_rare, wc_mythic) VALUES ('2026-01-01',250,100,20,26,5,6)"
     )
+    conn.executemany(
+        "INSERT INTO matches (match_id, started_at, ended_at, event_name, format,"
+        " deck_id, opponent_name, result, games_won, games_lost)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [
+            ("m1", "2026-08-26 10:00:00", "2026-08-26 10:10:00", "Play", "Constructed",
+             "d1", "DanitoRasen91", "win", 1, 0),
+            ("m2", "2026-08-25 09:00:00", None, "Play", "Constructed",
+             None, "YuZu", None, None, None),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO match_plays (match_id, seq, game_number, arena_id, is_self, action) "
+        "VALUES (?,?,?,?,?,?)",
+        [("m1", 1, 1, 2, 1, "land"), ("m1", 2, 1, 1, 0, "cast")],
+    )
+    conn.executemany(
+        "INSERT INTO match_combat (match_id, game_number, turn_number, instance_id, "
+        "seq, action, arena_id, is_self, target_is_player) VALUES (?,?,?,?,?,?,?,?,?)",
+        [("m1", 1, 3, 280, 10, "attack", 1, 1, 1)],
+    )
     conn.commit()
 
     mcp = MCPServer(name="test")
@@ -91,6 +112,53 @@ def test_deck_cards_include_images(client):
 
 def test_missing_deck_is_404(client):
     assert client.get("/api/decks/nope").status_code == 404
+
+
+def test_matches_lists_most_recent_first(client):
+    data = client.get("/api/matches").json()
+    assert data["count"] == 2
+    assert [m["match_id"] for m in data["matches"]] == ["m1", "m2"]
+
+
+def test_matches_include_deck_name_and_format(client):
+    m1 = next(m for m in client.get("/api/matches").json()["matches"] if m["match_id"] == "m1")
+    assert m1["deck_name"] == "Burn"
+    assert m1["format"] == "Constructed"
+    assert m1["result"] == "win"
+
+
+def test_in_progress_match_has_no_result_yet(client):
+    m2 = next(m for m in client.get("/api/matches").json()["matches"] if m["match_id"] == "m2")
+    assert m2["result"] is None
+    assert m2["ended_at"] is None
+
+
+def test_matches_can_filter_by_deck(client):
+    data = client.get("/api/matches?deck_id=d1").json()
+    assert [m["match_id"] for m in data["matches"]] == ["m1"]
+
+
+def test_match_plays_are_ordered_self_vs_opponent(client):
+    data = client.get("/api/matches/m1/plays").json()
+    assert data["count"] == 2
+    assert [(p["is_self"], p["name"]) for p in data["plays"]] == [
+        (1, "Mountain"), (0, "Lightning Bolt")
+    ]
+
+
+def test_match_plays_empty_for_a_match_with_none_recorded(client):
+    assert client.get("/api/matches/m2/plays").json() == {"plays": [], "count": 0}
+
+
+def test_match_combat_is_returned(client):
+    data = client.get("/api/matches/m1/combat").json()
+    assert data["count"] == 1
+    assert data["combat"][0]["name"] == "Lightning Bolt"
+    assert data["combat"][0]["target_is_player"] == 1
+
+
+def test_match_combat_empty_for_a_match_with_none_recorded(client):
+    assert client.get("/api/matches/m2/combat").json() == {"combat": [], "count": 0}
 
 
 def test_cards_search_annotates_ownership(client):

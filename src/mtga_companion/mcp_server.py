@@ -155,6 +155,33 @@ def get_match_history(limit: int = 20, deck_id: str | None = None) -> list[dict[
 
 
 @mcp.tool()
+def get_match_plays(match_id: str) -> list[dict[str, Any]]:
+    """Cards cast or played as a land during one match, in order, tagged
+    is_self (the player) or not (the opponent).
+
+    Covers *plays* only, not the whole game: no counterspells or removal
+    (nothing was cast, so no zone-transfer-from-hand event exists to see),
+    no combat, no life totals. This is enough to reconstruct each side's
+    curve and sequencing, not a full replay -- call get_match_history first
+    for the outcome and get_deck for what the player's own list contains.
+    """
+    return queries.get_match_plays(db(), match_id)
+
+
+@mcp.tool()
+def get_match_combat(match_id: str) -> list[dict[str, Any]]:
+    """Attacks and blocks during one match, in turn order, self vs opponent.
+
+    A block's target names the attacker it blocked; an attack's names what
+    it attacked only when that wasn't the opponent directly (a planeswalker
+    or battle) -- target_is_player tells you which. Not merged with
+    get_match_plays into one timeline; call both for the full picture of a
+    match (what was cast/played, and separately, what fought).
+    """
+    return queries.get_match_combat(db(), match_id)
+
+
+@mcp.tool()
 def get_deck_stats(deck_id: str) -> dict[str, Any]:
     """Win rate, mana curve, land count and color/type spread for one deck."""
     stats = queries.get_deck_stats(db(), deck_id)
@@ -230,7 +257,7 @@ def get_deck_candidates(
     format: str = "standard",
     colors: str | None = None,
     include_unowned: bool = False,
-    limit: int = 400,
+    limit: int = 2000,
 ) -> dict[str, Any]:
     """Cards available to build a deck with, for a given format.
 
@@ -240,8 +267,14 @@ def get_deck_candidates(
         colors: Restrict to a colour identity, e.g. "R" or "UB".
         include_unowned: Also return legal cards the player does not own, each
             with owned=0, so you can propose upgrades. Check the wildcard cost
-            with validate_deck before recommending one.
-        limit: Maximum cards to return.
+            with validate_deck before recommending one. The full unowned-inclusive
+            pool for a wide format can run to several thousand cards -- narrow
+            with `colors` if you hit `truncated`.
+        limit: Maximum cards to return. Regression: this used to default to
+            400 and silently drop it, ordered by mana value -- an owned pool
+            over 400 lost every card at the high end of its curve with no
+            indication anything was missing. Check `truncated` instead of
+            assuming `count` is the whole pool.
 
     Every entry carries `owned`, which is a LOWER BOUND -- Arena stopped
     reporting collection contents in 2021, so a card showing owned=0 may still
@@ -249,8 +282,10 @@ def get_deck_candidates(
     """
     conn = db()
     try:
+        owned_only = not include_unowned
+        total = builder_mod.candidate_pool_size(conn, format, colors, owned_only)
         pool = builder_mod.candidate_pool(
-            conn, format, colors, owned_only=not include_unowned, limit=limit
+            conn, format, colors, owned_only=owned_only, limit=limit
         )
     except ValueError as exc:
         return {"error": str(exc)}
@@ -259,6 +294,8 @@ def get_deck_candidates(
         "format": format,
         "colors": colors,
         "count": len(pool),
+        "total_matching": total,
+        "truncated": total > len(pool),
         "cards": pool,
         "wildcards_available": {
             "common": inv.get("wc_common"), "uncommon": inv.get("wc_uncommon"),
@@ -290,11 +327,15 @@ def validate_deck(
             actual stock. Omit for no budget constraint.
 
     Returns every problem at once (size, the four-copy limit counted by card
-    NAME, format legality, unknown names) plus the wildcard cost measured
-    against the player's actual stock, and -- if wildcard_budget was given --
-    whether this build respects it. Call this before presenting a deck, and if
-    `within_budget` is false, cut the cards named in `over_budget`'s rarities
-    and try again rather than presenting an over-budget deck.
+    NAME, format legality, unknown names, and -- for Brawl formats -- exactly
+    one commander plus every other card's color identity being a subset of
+    it) plus the wildcard cost measured against the player's actual stock,
+    and -- if wildcard_budget was given -- whether this build respects it.
+    Deck-size minimums for Brawl formats already include the commander (e.g.
+    Standard Brawl is 60 cards total, not 60 main + 1 commander). Call this
+    before presenting a deck, and if `within_budget` is false, cut the cards
+    named in `over_budget`'s rarities and try again rather than presenting an
+    over-budget deck.
     """
     conn = db()
     try:

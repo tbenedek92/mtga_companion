@@ -13,7 +13,7 @@ from typing import Any
 
 _CARD_FIELDS = (
     "c.arena_id, c.name, c.mana_cost, c.cmc, c.colors, c.type_line, "
-    "c.oracle_text, c.rarity, c.set_code, c.image_uri"
+    "c.oracle_text, c.power, c.toughness, c.rarity, c.set_code, c.image_uri"
 )
 
 
@@ -63,7 +63,8 @@ def get_deck(conn: sqlite3.Connection, deck_id: str) -> dict[str, Any] | None:
         f"""
         SELECT dc.board, SUM(dc.quantity) AS quantity,
                MIN(c.arena_id) AS arena_id, c.name, c.mana_cost, c.cmc,
-               c.colors, c.type_line, c.oracle_text, c.rarity, c.set_code,
+               c.colors, c.type_line, c.oracle_text, c.power, c.toughness,
+               c.rarity, c.set_code,
                c.image_uri, GROUP_CONCAT(dc.arena_id) AS printings
         FROM deck_cards dc
         LEFT JOIN cards c ON c.arena_id = dc.arena_id
@@ -212,7 +213,7 @@ def get_match_history(
     conn: sqlite3.Connection, limit: int = 20, deck_id: str | None = None
 ) -> list[dict[str, Any]]:
     sql = [
-        "SELECT m.match_id, m.started_at, m.ended_at, m.event_name, m.deck_id,",
+        "SELECT m.match_id, m.started_at, m.ended_at, m.event_name, m.format, m.deck_id,",
         "       d.name AS deck_name, m.opponent_name, m.opponent_colors,",
         "       m.result, m.games_won, m.games_lost, m.on_play",
         "FROM matches m LEFT JOIN decks d ON d.deck_id = m.deck_id",
@@ -224,6 +225,46 @@ def get_match_history(
     sql.append("ORDER BY m.started_at DESC LIMIT ?")
     params.append(limit)
     return [dict(r) for r in conn.execute("\n".join(sql), params)]
+
+
+def get_match_plays(conn: sqlite3.Connection, match_id: str) -> list[dict[str, Any]]:
+    """Cards cast or played as a land during one match, in order, self vs
+    opponent. Empty for a match recorded before match_plays existed -- see
+    parse._extract_gre_event's docstring for what this table can and can't
+    tell you (no counterspells, no life totals). For combat, see
+    get_match_combat."""
+    rows = conn.execute(
+        "SELECT mp.seq, mp.game_number, mp.is_self, mp.action, mp.arena_id, "
+        "       c.name, c.mana_cost, c.type_line "
+        "FROM match_plays mp LEFT JOIN cards c ON c.arena_id = mp.arena_id "
+        "WHERE mp.match_id = ? ORDER BY mp.seq",
+        (match_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_match_combat(conn: sqlite3.Connection, match_id: str) -> list[dict[str, Any]]:
+    """Attacks and blocks during one match, in turn order, self vs opponent.
+
+    Not merged into get_match_plays' timeline: plays are ordered by a GRE
+    annotation id, combat by turn number and the enclosing message's own
+    gameStateId -- close cousins, not the same numbering, so interleaving
+    them exactly isn't attempted. A block's target_arena_id is the attacker
+    it blocked; an attack's is what it attacked, if not the opponent
+    directly (target_is_player tells you which). Either can resolve to
+    nothing for a token creature -- tokens aren't in the card database.
+    """
+    rows = conn.execute(
+        "SELECT mc.game_number, mc.turn_number, mc.is_self, mc.action, "
+        "       mc.arena_id, c.name, "
+        "       mc.target_arena_id, t.name AS target_name, mc.target_is_player "
+        "FROM match_combat mc "
+        "LEFT JOIN cards c ON c.arena_id = mc.arena_id "
+        "LEFT JOIN cards t ON t.arena_id = mc.target_arena_id "
+        "WHERE mc.match_id = ? ORDER BY mc.turn_number, mc.seq",
+        (match_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_deck_stats(conn: sqlite3.Connection, deck_id: str) -> dict[str, Any] | None:
@@ -311,15 +352,4 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
             "and collection cannot be read until you do."
         )
 
-    # Deck, inventory and rank parsing is verified against a real session;
-    # match and draft parsing has never seen a real payload. Say so rather than
-    # letting an empty match list read as "you have played no games".
-    out["unverified"] = ["match_history", "draft_picks"]
-    out["unverified_note"] = (
-        "Match and draft parsing is written from documentation, not from an "
-        "observed payload, and is deliberately deferred. An empty match history "
-        "means 'not yet captured', not 'no matches played'. To finish it: play a "
-        "match, run 'mtga-companion ingest', then check the raw_events table for "
-        "rows with reason 'no extractor matched'."
-    )
     return out

@@ -360,6 +360,97 @@ function filterBar(onChange, { showSearch = true, showOwnedToggle = false } = {}
     el('div', { class: 'spacer' }), displayToggle());
 }
 
+let matchState = { id: null };
+
+function matchRow(m) {
+  const resultClass = m.result === 'win' ? 'owned' : m.result === 'loss' ? 'missing' : '';
+  const resultLabel = m.result
+    ? m.result.toUpperCase()
+    : (m.ended_at ? '—' : 'IN PROGRESS');
+  return el('div', {
+    class: 'panel clickable', style: 'margin-bottom:10px',
+    onclick: () => { matchState.id = m.match_id; render(); },
+  },
+    el('div', { style: 'display:flex;justify-content:space-between;gap:10px' },
+      el('strong', {}, `vs ${m.opponent_name || 'unknown opponent'}`),
+      el('span', { class: `pill ${resultClass}` }, resultLabel)),
+    el('div', { class: 'muted', style: 'margin-top:6px;font-size:12px' },
+      [m.format, m.event_name, m.deck_name].filter(Boolean).join(' · ') || 'no details'),
+    el('div', { class: 'muted', style: 'font-size:12px;margin-top:2px' },
+      (m.games_won || m.games_lost) ? `${m.games_won || 0}–${m.games_lost || 0} games · ` : '',
+      m.started_at ? m.started_at.slice(0, 16) : ''));
+}
+
+function whoPill(isSelf) {
+  return el('span', { class: `pill ${isSelf ? 'owned' : ''}` },
+    isSelf === 1 ? 'you' : isSelf === 0 ? 'opponent' : '?');
+}
+
+function playRow(p) {
+  return el('div', {
+    style: 'display:flex;justify-content:space-between;gap:10px;padding:6px 0;'
+      + 'border-bottom:1px solid var(--line)',
+  },
+    el('span', {}, whoPill(p.is_self), ' ', p.name || `#${p.arena_id}`),
+    el('span', { class: 'muted', style: 'font-size:12px' },
+      p.action === 'land' ? 'land' : 'cast',
+      p.game_number ? ` · game ${p.game_number}` : ''));
+}
+
+function combatRow(c) {
+  const who = c.name || `#${c.arena_id}`;
+  const detail = c.action === 'attack'
+    ? (c.target_is_player ? 'attacked you/opponent directly'
+        : c.target_name ? `attacked ${c.target_name}` : 'attacked')
+    : (c.target_name ? `blocked ${c.target_name}` : 'blocked');
+  return el('div', {
+    style: 'display:flex;justify-content:space-between;gap:10px;padding:6px 0;'
+      + 'border-bottom:1px solid var(--line)',
+  },
+    el('span', {}, whoPill(c.is_self), ' ', who, ' ', detail),
+    el('span', { class: 'muted', style: 'font-size:12px' },
+      c.turn_number ? `turn ${c.turn_number}` : '',
+      c.game_number ? ` · game ${c.game_number}` : ''));
+}
+
+async function viewMatchDetail(id) {
+  const [matches, plays, combat] = await Promise.all([
+    api('/api/matches?limit=50'),
+    api(`/api/matches/${encodeURIComponent(id)}/plays`),
+    api(`/api/matches/${encodeURIComponent(id)}/combat`),
+  ]);
+  const m = matches.matches.find((x) => x.match_id === id);
+  return el('div', {},
+    el('button', { class: 'btn', onclick: () => { matchState.id = null; render(); } },
+      '← Matches'),
+    el('h2', { style: 'margin-top:10px' }, `vs ${m ? m.opponent_name : 'unknown opponent'}`),
+    m ? matchRow(m) : null,
+    el('h3', {}, 'Plays'),
+    plays.count === 0
+      ? el('div', { class: 'empty' },
+          'No play-by-play recorded for this match -- either it predates this '
+          + 'feature, or it was played before the app started tailing the log.')
+      : el('div', { class: 'panel', style: 'margin-bottom:18px' }, plays.plays.map(playRow)),
+    el('h3', {}, 'Combat'),
+    combat.count === 0
+      ? el('div', { class: 'empty' },
+          'No combat recorded for this match -- either it predates this feature, '
+          + 'or no creature attacked or blocked.')
+      : el('div', { class: 'panel' }, combat.combat.map(combatRow)));
+}
+
+async function viewMatches() {
+  if (matchState.id) return viewMatchDetail(matchState.id);
+  const matches = await api('/api/matches?limit=50');
+  return el('div', {},
+    el('h2', {}, 'Matches'),
+    matches.count === 0
+      ? el('div', { class: 'empty' },
+          'No matches captured yet. Matches are only picked up while ',
+          el('code', {}, 'mtga-companion serve'), ' is running -- play one with it up.')
+      : el('div', {}, matches.matches.map(matchRow)));
+}
+
 async function viewCollection() {
   const qs = new URLSearchParams({ limit: 300 });
   if (filters.colors) qs.set('colors', filters.colors);
@@ -658,8 +749,8 @@ function showSuggestion(s) {
 /* ----------------------------------------------------------------- router */
 
 const views = {
-  dashboard: viewDashboard, decks: viewDecks, collection: viewCollection,
-  cards: viewCards, builder: viewBuilder,
+  dashboard: viewDashboard, decks: viewDecks, matches: viewMatches,
+  collection: viewCollection, cards: viewCards, builder: viewBuilder,
 };
 let current = 'dashboard';
 
@@ -677,6 +768,7 @@ $('#nav').addEventListener('click', (e) => {
   if (!btn) return;
   current = btn.dataset.view;
   deckState.id = null;
+  matchState.id = null;
   for (const b of $('#nav').children) b.classList.toggle('active', b === btn);
   render();
 });

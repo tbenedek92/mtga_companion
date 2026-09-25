@@ -277,23 +277,517 @@ class TestExtraction:
         assert (row["constructed_won"], row["constructed_lost"]) == (16, 7)
         assert row["limited_level"] == 4
 
-    def test_draft_pick_with_comma_separated_pack(self, conn):
-        payload = {"DraftId": "d1", "PackNumber": 1, "PickNumber": 2,
-                   "CardId": 555, "PackCards": "111,222,555"}
+    def test_draft_pick_records_full_list_on_completion(self, conn):
+        """Real QuickDraft shape: fields are JSON-encoded under `Payload`, and
+        only the terminal "Completed" event's cumulative `PickedCards` is
+        trustworthy -- Arena never reports a single chosen card per pick."""
+        inner = {"EventName": "QuickDraft_HOB_20260820", "DraftStatus": "Completed",
+                  "PackNumber": 2, "PickNumber": 13,
+                  "PickedCards": ["103541", "103464", "103415"]}
+        payload = {"CurrentModule": "BotDraft", "Payload": json.dumps(inner)}
         p = parse.LogParser(conn)
-        p.feed("<== Draft.Notify(x)")
+        p.feed("<== BotDraft(x)")
         assert p.feed(json.dumps(payload)) is True
 
-        row = conn.execute("SELECT * FROM draft_picks").fetchone()
-        assert row["arena_id"] == 555
-        assert row["pack_cards"] == "111,222,555"
+        rows = conn.execute(
+            "SELECT pick_number, arena_id FROM draft_picks ORDER BY pick_number"
+        ).fetchall()
+        assert [(r["pick_number"], r["arena_id"]) for r in rows] == [
+            (0, 103541), (1, 103464), (2, 103415)
+        ]
+
+    def test_draft_pick_ignores_in_progress_events(self, conn):
+        """PickNext events never reveal which card was chosen -- only the
+        final Completed event's PickedCards is authoritative."""
+        inner = {"EventName": "QuickDraft_HOB_20260820", "DraftStatus": "PickNext",
+                  "PackNumber": 0, "PickNumber": 1, "DraftPack": ["1", "2"],
+                  "PickedCards": ["103541"]}
+        payload = {"CurrentModule": "BotDraft", "Payload": json.dumps(inner)}
+        p = parse.LogParser(conn)
+        p.feed("<== BotDraft(x)")
+        assert p.feed(json.dumps(payload)) is False
+
+        assert conn.execute("SELECT COUNT(*) FROM draft_picks").fetchone()[0] == 0
+
+
+class TestMatchExtraction:
+    """Shapes trimmed from two real completed matches captured live: one won
+    by the opponent conceding, one lost normally. Both confirmed that match
+    traffic uses a fourth line shape entirely -- see _MATCH_HEADER."""
+
+    ME = "TNOMMPVRQZDODPW2LOP67R24FQ"
+    OPPONENT = "E6G5EMXF4VH4PGRIMT4GNRTTH4"
+
+    def room_event(self, state_type, extra=None):
+        room = {
+            "gameRoomInfo": {
+                "gameRoomConfig": {
+                    "reservedPlayers": [
+                        {"userId": self.ME, "playerName": "igor", "systemSeatId": 1,
+                         "teamId": 1, "eventId": "Play"},
+                        {"userId": self.OPPONENT, "playerName": "DanitoRasen91",
+                         "systemSeatId": 2, "teamId": 2, "eventId": "Play"},
+                    ],
+                    "matchId": "45189e2a-2761-456f-9a09-24619f9997b5",
+                },
+                "stateType": state_type,
+            }
+        }
+        if extra:
+            room["gameRoomInfo"].update(extra)
+        return {"matchGameRoomStateChangedEvent": room}
+
+    def feed_match(self, conn, header, body):
+        p = parse.LogParser(conn)
+        assert p.feed(header) is False
+        result = p.feed(json.dumps(body))
+        return p, result
+
+    def test_match_header_line_is_recognised(self, conn):
+        _, result = self.feed_match(
+            conn,
+            f"[UnityCrossThreadLogger]8/26/2026 9:57:09 AM: Match to {self.ME}: "
+            "MatchGameRoomStateChangedEvent",
+            self.room_event("MatchGameRoomStateType_Playing"),
+        )
+        assert result is True
+        row = conn.execute("SELECT * FROM matches").fetchone()
+        assert row["match_id"] == "45189e2a-2761-456f-9a09-24619f9997b5"
+        assert row["opponent_name"] == "DanitoRasen91"
+        assert row["event_name"] == "Play"
+        assert row["result"] is None
+
+    def test_client_to_match_direction_is_also_recognised(self, conn):
+        """The header also appears as "<id> to Match: <label>" for
+        client-originated traffic -- same id, reversed order."""
+        p = parse.LogParser(conn)
+        assert p.feed(
+            f"[UnityCrossThreadLogger]8/26/2026 9:57:11 AM: {self.ME} to Match: "
+            "ClientToGremessage"
+        ) is False
+        # Not a shape we model; recognising the header must not itself crash
+        # or misfire just because the body doesn't match any route.
+        assert p.feed(json.dumps({"requestId": 1})) is False
+
+    def test_win_by_concession_is_recorded_from_the_players_own_seat(self, conn):
+        """Regression: finalMatchResult only ever names a winningTeamId, never
+        "you" -- without threading the account id from the header, there is
+        no way to tell this was a win rather than a loss."""
+        self.feed_match(
+            conn,
+            f"[UnityCrossThreadLogger]8/26/2026 9:57:09 AM: Match to {self.ME}: "
+            "MatchGameRoomStateChangedEvent",
+            self.room_event("MatchGameRoomStateType_Playing"),
+        )
+        self.feed_match(
+            conn,
+            f"[UnityCrossThreadLogger]8/26/2026 10:02:52 AM: Match to {self.ME}: "
+            "MatchGameRoomStateChangedEvent",
+            self.room_event("MatchGameRoomStateType_MatchCompleted", {
+                "finalMatchResult": {
+                    "matchId": "45189e2a-2761-456f-9a09-24619f9997b5",
+                    "resultList": [
+                        {"scope": "MatchScope_Game", "result": "ResultType_WinLoss",
+                         "winningTeamId": 1, "reason": "ResultReason_Concede"},
+                        {"scope": "MatchScope_Match", "result": "ResultType_WinLoss",
+                         "winningTeamId": 1, "reason": "ResultReason_Concede"},
+                    ],
+                },
+            }),
+        )
+        row = conn.execute("SELECT * FROM matches").fetchone()
+        assert row["result"] == "win"
+        assert (row["games_won"], row["games_lost"]) == (1, 0)
+        assert row["ended_at"] is not None
+
+    def test_loss_is_recorded_when_the_other_team_wins(self, conn):
+        me_second_seat = {
+            "gameRoomInfo": {
+                "gameRoomConfig": {
+                    "reservedPlayers": [
+                        {"userId": self.ME, "playerName": "igor", "systemSeatId": 1,
+                         "teamId": 1, "eventId": "Play"},
+                        {"userId": "KQGBB2B3AZDIJELK3SGYMCQDFE", "playerName": "YuZu",
+                         "systemSeatId": 2, "teamId": 2, "eventId": "Play"},
+                    ],
+                    "matchId": "cefb539e-7eb8-4d5f-a197-8c9b65a85262",
+                },
+                "stateType": "MatchGameRoomStateType_MatchCompleted",
+                "finalMatchResult": {
+                    "matchId": "cefb539e-7eb8-4d5f-a197-8c9b65a85262",
+                    "resultList": [
+                        {"scope": "MatchScope_Game", "result": "ResultType_WinLoss",
+                         "winningTeamId": 2, "reason": "ResultReason_Game"},
+                        {"scope": "MatchScope_Match", "result": "ResultType_WinLoss",
+                         "winningTeamId": 2, "reason": "ResultReason_Game"},
+                    ],
+                },
+            }
+        }
+        self.feed_match(
+            conn,
+            f"[UnityCrossThreadLogger]8/26/2026 10:12:53 AM: Match to {self.ME}: "
+            "MatchGameRoomStateChangedEvent",
+            {"matchGameRoomStateChangedEvent": me_second_seat},
+        )
+        row = conn.execute("SELECT * FROM matches").fetchone()
+        assert row["result"] == "loss"
+        assert (row["games_won"], row["games_lost"]) == (0, 1)
+        assert row["opponent_name"] == "YuZu"
+
+    def test_format_is_pulled_from_gre_events_not_room_state(self, conn):
+        """superFormat never appears in MatchGameRoomStateChangedEvent -- only
+        inside the GRE message stream's gameInfo."""
+        self.feed_match(
+            conn,
+            f"[UnityCrossThreadLogger]8/26/2026 9:57:09 AM: Match to {self.ME}: "
+            "MatchGameRoomStateChangedEvent",
+            self.room_event("MatchGameRoomStateType_Playing"),
+        )
+        gre_body = {
+            "greToClientEvent": {
+                "greToClientMessages": [
+                    {"type": "GREMessageType_GameStateMessage", "gameStateMessage": {
+                        "gameInfo": {
+                            "matchID": "45189e2a-2761-456f-9a09-24619f9997b5",
+                            "superFormat": "SuperFormat_Constructed",
+                        }
+                    }},
+                ]
+            }
+        }
+        p, result = self.feed_match(
+            conn,
+            f"[UnityCrossThreadLogger]8/26/2026 9:57:09 AM: Match to {self.ME}: "
+            "GreToClientEvent",
+            gre_body,
+        )
+        assert result is True
+        assert conn.execute("SELECT format FROM matches").fetchone()["format"] == "Constructed"
+
+    def test_gre_traffic_without_gameinfo_does_not_flood_raw_events(self, conn):
+        """Most GreToClientEvent messages (card taps, hover state, timers) carry
+        no gameInfo at all -- deliberately unmodeled, not unrecognised, so they
+        must not spam raw_events with one row per message."""
+        p, result = self.feed_match(
+            conn,
+            f"[UnityCrossThreadLogger]8/26/2026 9:57:09 AM: Match to {self.ME}: "
+            "GreToClientEvent",
+            {"greToClientEvent": {"greToClientMessages": [
+                {"type": "GREMessageType_TimerStateMessage", "timerStateMessage": {}}
+            ]}},
+        )
+        assert result is True
+        assert conn.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0] == 0
+
+
+class TestGrePlays:
+    """Shapes trimmed from the same real matches: what card left whose hand,
+    and in what order. Arena has no "X played card Y" event -- only a
+    zone-transfer annotation naming an object id and a source zone id, both
+    of which are only resolved to a real card/owner via caches built from
+    earlier, easy-to-miss messages. See _extract_gre_event."""
+
+    ME = "TNOMMPVRQZDODPW2LOP67R24FQ"
+    OPPONENT = "E6G5EMXF4VH4PGRIMT4GNRTTH4"
+    MATCH_ID = "45189e2a-2761-456f-9a09-24619f9997b5"
+
+    def room_playing(self):
+        return {"matchGameRoomStateChangedEvent": {"gameRoomInfo": {
+            "gameRoomConfig": {
+                "reservedPlayers": [
+                    {"userId": self.ME, "playerName": "igor", "systemSeatId": 1,
+                     "teamId": 1, "eventId": "Play"},
+                    {"userId": self.OPPONENT, "playerName": "DanitoRasen91",
+                     "systemSeatId": 2, "teamId": 2, "eventId": "Play"},
+                ],
+                "matchId": self.MATCH_ID,
+            },
+            "stateType": "MatchGameRoomStateType_Playing",
+        }}}
+
+    def zone_transfer(self, ann_id, instance_id, zone_src, category):
+        return {"id": ann_id, "affectedIds": [instance_id],
+                "type": ["AnnotationType_ZoneTransfer"],
+                "details": [
+                    {"key": "zone_src", "type": "KeyValuePairValueType_int32",
+                     "valueInt32": [zone_src]},
+                    {"key": "zone_dest", "type": "KeyValuePairValueType_int32",
+                     "valueInt32": [28]},
+                    {"key": "category", "type": "KeyValuePairValueType_string",
+                     "valueString": [category]},
+                ]}
+
+    @pytest.fixture
+    def parser(self, conn):
+        """A match already under way: room seen (my_seat known), zones and
+        the player's own opening-hand object already established -- the
+        state every later diff in these tests builds on."""
+        p = parse.LogParser(conn)
+        header = (f"[UnityCrossThreadLogger]8/26/2026 9:57:09 AM: Match to {self.ME}: ")
+        p.feed(header + "MatchGameRoomStateChangedEvent")
+        p.feed(json.dumps(self.room_playing()))
+        full = {"greToClientEvent": {"greToClientMessages": [{
+            "gameStateMessage": {
+                "type": "GameStateType_Full",
+                "gameInfo": {"matchID": self.MATCH_ID, "gameNumber": 1,
+                             "superFormat": "SuperFormat_Constructed"},
+                "zones": [
+                    {"zoneId": 31, "type": "ZoneType_Hand", "ownerSeatId": 1},
+                    {"zoneId": 35, "type": "ZoneType_Hand", "ownerSeatId": 2},
+                    {"zoneId": 28, "type": "ZoneType_Battlefield"},
+                    {"zoneId": 27, "type": "ZoneType_Stack"},
+                ],
+                # My own Mountain is visible to me from the start; the
+                # opponent's hand is hidden, so no gameObjects entry for it
+                # exists yet -- that only arrives when they play it.
+                "gameObjects": [
+                    {"instanceId": 279, "grpId": 73514, "zoneId": 31},
+                ],
+            }
+        }]}}
+        p.feed(header + "GreToClientEvent")
+        p.feed(json.dumps(full))
+        return p
+
+    def test_my_land_is_recorded_as_self(self, conn, parser):
+        diff = {"greToClientEvent": {"greToClientMessages": [{"gameStateMessage": {
+            "type": "GameStateType_Diff",
+            "annotations": [self.zone_transfer(154, 279, zone_src=31, category="PlayLand")],
+        }}]}}
+        header = f"[UnityCrossThreadLogger]8/26/2026 9:57:12 AM: Match to {self.ME}: "
+        parser.feed(header + "GreToClientEvent")
+        assert parser.feed(json.dumps(diff)) is True
+
+        row = conn.execute("SELECT * FROM match_plays").fetchone()
+        assert (row["is_self"], row["action"], row["arena_id"]) == (1, "land", 73514)
+        assert row["game_number"] == 1
+        assert conn.execute(
+            "SELECT is_self FROM match_cards_seen WHERE arena_id = 73514"
+        ).fetchone()["is_self"] == 1
+
+    def test_opponents_card_is_revealed_and_recorded_as_opponent(self, conn, parser):
+        """The opponent's card only becomes knowable at the exact moment they
+        cast it -- its gameObjects entry and its zone-transfer annotation
+        arrive together, in the same diff."""
+        diff = {"greToClientEvent": {"greToClientMessages": [{"gameStateMessage": {
+            "type": "GameStateType_Diff",
+            "gameObjects": [{"instanceId": 400, "grpId": 90492, "zoneId": 27}],
+            "annotations": [self.zone_transfer(196, 400, zone_src=35, category="CastSpell")],
+        }}]}}
+        header = f"[UnityCrossThreadLogger]8/26/2026 9:57:22 AM: Match to {self.ME}: "
+        parser.feed(header + "GreToClientEvent")
+        parser.feed(json.dumps(diff))
+
+        row = conn.execute("SELECT * FROM match_plays").fetchone()
+        assert (row["is_self"], row["action"], row["arena_id"]) == (0, "cast", 90492)
+
+    def test_non_play_zone_transfers_are_not_recorded(self, conn, parser):
+        """Resolve (stack -> battlefield) and Draw are zone transfers too but
+        do not mean "a card was played"."""
+        diff = {"greToClientEvent": {"greToClientMessages": [{"gameStateMessage": {
+            "type": "GameStateType_Diff",
+            "annotations": [
+                self.zone_transfer(175, 279, zone_src=27, category="Resolve"),
+                self.zone_transfer(188, 279, zone_src=32, category="Draw"),
+            ],
+        }}]}}
+        header = f"[UnityCrossThreadLogger]8/26/2026 9:57:12 AM: Match to {self.ME}: "
+        parser.feed(header + "GreToClientEvent")
+        parser.feed(json.dumps(diff))
+
+        assert conn.execute("SELECT COUNT(*) FROM match_plays").fetchone()[0] == 0
+
+    def test_replaying_the_same_line_does_not_duplicate(self, conn, parser):
+        diff = {"greToClientEvent": {"greToClientMessages": [{"gameStateMessage": {
+            "type": "GameStateType_Diff",
+            "annotations": [self.zone_transfer(154, 279, zone_src=31, category="PlayLand")],
+        }}]}}
+        header = f"[UnityCrossThreadLogger]8/26/2026 9:57:12 AM: Match to {self.ME}: "
+        parser.feed(header + "GreToClientEvent")
+        parser.feed(json.dumps(diff))
+        parser.feed(header + "GreToClientEvent")
+        parser.feed(json.dumps(diff))
+
+        assert conn.execute("SELECT COUNT(*) FROM match_plays").fetchone()[0] == 1
+
+    def test_a_new_match_clears_the_previous_match_object_cache(self, conn, parser):
+        """Regression: Arena reuses small instance ids across different
+        matches (confirmed from two real captures), so a stale cache would
+        resolve a new match's instance 279 to the previous match's card."""
+        other_room = {"matchGameRoomStateChangedEvent": {"gameRoomInfo": {
+            "gameRoomConfig": {
+                "reservedPlayers": [
+                    {"userId": self.ME, "playerName": "igor", "systemSeatId": 2,
+                     "teamId": 2, "eventId": "Play"},
+                ],
+                "matchId": "cefb539e-7eb8-4d5f-a197-8c9b65a85262",
+            },
+            "stateType": "MatchGameRoomStateType_Playing",
+        }}}
+        header = f"[UnityCrossThreadLogger]8/26/2026 10:12:53 AM: Match to {self.ME}: "
+        parser.feed(header + "MatchGameRoomStateChangedEvent")
+        parser.feed(json.dumps(other_room))
+
+        # Instance 279 was never re-established in the new match, so a
+        # zone transfer naming it must resolve to nothing, not the old card.
+        diff = {"greToClientEvent": {"greToClientMessages": [{"gameStateMessage": {
+            "type": "GameStateType_Diff",
+            "annotations": [self.zone_transfer(999, 279, zone_src=31, category="PlayLand")],
+        }}]}}
+        parser.feed(header + "GreToClientEvent")
+        parser.feed(json.dumps(diff))
+
+        assert conn.execute("SELECT COUNT(*) FROM match_plays").fetchone()[0] == 0
+
+
+class TestGreCombat:
+    """Shapes trimmed from a real captured combat: an attack that went
+    unblocked, and a separate creature blocked over several turns. Arena has
+    no "X attacked Y" event -- combat lives entirely in a creature's own
+    attackState/blockState fields, resent across several diffs while combat
+    resolves. See _extract_gre_event."""
+
+    ME = "TNOMMPVRQZDODPW2LOP67R24FQ"
+    OPPONENT = "E6G5EMXF4VH4PGRIMT4GNRTTH4"
+    MATCH_ID = "45189e2a-2761-456f-9a09-24619f9997b5"
+
+    @pytest.fixture
+    def parser(self, conn):
+        p = parse.LogParser(conn)
+        header = f"[UnityCrossThreadLogger]8/26/2026 9:57:09 AM: Match to {self.ME}: "
+        room = {"matchGameRoomStateChangedEvent": {"gameRoomInfo": {
+            "gameRoomConfig": {
+                "reservedPlayers": [
+                    {"userId": self.ME, "playerName": "igor", "systemSeatId": 1,
+                     "teamId": 1, "eventId": "Play"},
+                    {"userId": self.OPPONENT, "playerName": "DanitoRasen91",
+                     "systemSeatId": 2, "teamId": 2, "eventId": "Play"},
+                ],
+                "matchId": self.MATCH_ID,
+            },
+            "stateType": "MatchGameRoomStateType_Playing",
+        }}}
+        p.feed(header + "MatchGameRoomStateChangedEvent")
+        p.feed(json.dumps(room))
+        full = {"greToClientEvent": {"greToClientMessages": [{"gameStateMessage": {
+            "type": "GameStateType_Full",
+            "gameInfo": {"matchID": self.MATCH_ID, "gameNumber": 1,
+                         "superFormat": "SuperFormat_Constructed"},
+            "turnInfo": {"turnNumber": 3},
+        }}]}}
+        p.feed(header + "GreToClientEvent")
+        p.feed(json.dumps(full))
+        return p
+
+    def feed_gre(self, parser, at, body):
+        header = f"[UnityCrossThreadLogger]8/26/2026 9:57:{at} AM: Match to {self.ME}: "
+        parser.feed(header + "GreToClientEvent")
+        return parser.feed(json.dumps(body))
+
+    def test_my_attacker_targeting_the_player_is_recorded(self, conn, parser):
+        diff = {"greToClientEvent": {"greToClientMessages": [{"gameStateMessage": {
+            "type": "GameStateType_Diff",
+            "gameObjects": [{
+                "instanceId": 280, "grpId": 94051, "ownerSeatId": 1,
+                "attackState": "AttackState_Declared", "attackInfo": {"targetId": 2},
+            }],
+        }}]}}
+        assert self.feed_gre(parser, "58", diff) is True
+
+        row = conn.execute("SELECT * FROM match_combat").fetchone()
+        assert (row["action"], row["is_self"], row["arena_id"]) == ("attack", 1, 94051)
+        assert (row["target_is_player"], row["target_arena_id"]) == (1, None)
+        assert row["turn_number"] == 3
+
+    def test_repeated_attacking_state_across_several_diffs_is_not_duplicated(
+        self, conn, parser
+    ):
+        """Real captures show the same attacker resent Declared, then
+        Attacking, then Attacking+Unblocked as combat resolves -- one
+        creature attacking once, not three attacks."""
+        for state in ("AttackState_Declared", "AttackState_Attacking", "AttackState_Attacking"):
+            diff = {"greToClientEvent": {"greToClientMessages": [{"gameStateMessage": {
+                "type": "GameStateType_Diff",
+                "gameObjects": [{
+                    "instanceId": 280, "grpId": 94051, "ownerSeatId": 1,
+                    "attackState": state, "attackInfo": {"targetId": 2},
+                }],
+            }}]}}
+            self.feed_gre(parser, "58", diff)
+
+        assert conn.execute("SELECT COUNT(*) FROM match_combat").fetchone()[0] == 1
+
+    def test_opponents_blocker_records_which_attacker_it_blocked(self, conn, parser):
+        """Trimmed from a real block: the blocker names the attacker's
+        instanceId in blockInfo.attackerIds, resolved via the same object
+        cache attack tracking uses."""
+        reveal_attacker = {"greToClientEvent": {"greToClientMessages": [{"gameStateMessage": {
+            "type": "GameStateType_Diff",
+            "gameObjects": [{"instanceId": 353, "grpId": 90492, "ownerSeatId": 1}],
+        }}]}}
+        self.feed_gre(parser, "20", reveal_attacker)
+
+        block = {"greToClientEvent": {"greToClientMessages": [{"gameStateMessage": {
+            "type": "GameStateType_Diff",
+            "gameObjects": [{
+                "instanceId": 358, "grpId": 104963, "ownerSeatId": 2,
+                "blockState": "BlockState_Declared", "blockInfo": {"attackerIds": [353]},
+            }],
+        }}]}}
+        self.feed_gre(parser, "25", block)
+
+        row = conn.execute("SELECT * FROM match_combat WHERE action = 'block'").fetchone()
+        assert (row["is_self"], row["arena_id"], row["target_arena_id"]) == (0, 104963, 90492)
+
+    def test_a_new_game_lets_a_reused_instance_id_attack_again(self, conn, parser):
+        """Regression: a Bo3's game 2 reuses small instance ids for entirely
+        different creatures -- without game_number in the key, game 2's
+        first attack would silently collide with game 1's and be dropped."""
+        diff = {"greToClientEvent": {"greToClientMessages": [{"gameStateMessage": {
+            "type": "GameStateType_Diff",
+            "gameObjects": [{
+                "instanceId": 280, "grpId": 94051, "ownerSeatId": 1,
+                "attackState": "AttackState_Declared", "attackInfo": {"targetId": 2},
+            }],
+        }}]}}
+        self.feed_gre(parser, "58", diff)
+
+        new_game = {"greToClientEvent": {"greToClientMessages": [{"gameStateMessage": {
+            "type": "GameStateType_Full",
+            "gameInfo": {"matchID": self.MATCH_ID, "gameNumber": 2,
+                         "superFormat": "SuperFormat_Constructed"},
+            "turnInfo": {"turnNumber": 1},
+        }}]}}
+        self.feed_gre(parser, "58", new_game)
+
+        game2_attack = {"greToClientEvent": {"greToClientMessages": [{"gameStateMessage": {
+            "type": "GameStateType_Diff",
+            "gameObjects": [{
+                # Same instanceId (280) and turnNumber (3) as game 1's attack,
+                # but a different card and a different game.
+                "instanceId": 280, "grpId": 12345, "ownerSeatId": 1,
+                "attackState": "AttackState_Declared", "attackInfo": {"targetId": 2},
+            }],
+        }}]}}
+        self.feed_gre(parser, "59", {"greToClientEvent": {"greToClientMessages": [{
+            "gameStateMessage": {"type": "GameStateType_Diff", "turnInfo": {"turnNumber": 3}},
+        }]}})
+        self.feed_gre(parser, "60", game2_attack)
+
+        rows = conn.execute(
+            "SELECT game_number, arena_id FROM match_combat ORDER BY game_number"
+        ).fetchall()
+        assert [(r["game_number"], r["arena_id"]) for r in rows] == [(1, 94051), (2, 12345)]
 
 
 class TestCardGrants:
-    """Arena reports inventory *changes* even though it no longer reports
-    contents, so a running tracker accumulates the real collection over time.
-
-    Shapes are provisional: no booster has been opened into a captured log yet.
+    """The theory was that Arena reports inventory *changes* even though it no
+    longer reports contents, so a running tracker could accumulate the real
+    collection over time. Confirmed false: a real booster opened on this
+    machine left no trace anywhere in the log. These shapes are kept and
+    tested defensively in case a future payload proves them right, but do not
+    expect this extractor to ever fire -- see its docstring in parse.py.
     """
 
     def test_flat_grpid_list_counts_repeats_as_quantity(self, conn):

@@ -6,7 +6,8 @@ import pytest
 
 from mtga_companion import collection, deckbuilder as db, store
 
-LEGAL_ALL = '{"standard":"legal","alchemy":"legal","historic":"legal","brawl":"legal"}'
+LEGAL_ALL = ('{"standard":"legal","alchemy":"legal","historic":"legal","brawl":"legal",'
+             '"standardbrawl":"legal"}')
 NOT_STANDARD = '{"standard":"not_legal","historic":"legal","brawl":"legal"}'
 
 
@@ -15,15 +16,28 @@ def conn(tmp_path):
     c = store.connect(tmp_path / "test.sqlite")
     c.executemany(
         "INSERT INTO cards (arena_id, name, mana_cost, cmc, colors, color_identity,"
-        " type_line, rarity, set_code, collector_number, legalities, source)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,'scryfall')",
+        " type_line, power, toughness, rarity, set_code, collector_number, legalities, source)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'scryfall')",
         [
-            (1, "Lightning Bolt", "{R}", 1, "R", "R", "Instant", "rare", "sta", "42", LEGAL_ALL),
-            (2, "Lightning Bolt", "{R}", 1, "R", "R", "Instant", "rare", "vma", "99", LEGAL_ALL),
-            (3, "Mountain", "", 0, "", "", "Basic Land — Mountain", "basic", "pana", "219", LEGAL_ALL),
-            (4, "Counterspell", "{U}{U}", 2, "U", "U", "Instant", "uncommon", "sta", "12", LEGAL_ALL),
-            (5, "Sheoldred", "{2}{B}{B}", 4, "B", "B", "Creature", "mythic", "dmu", "107", LEGAL_ALL),
-            (6, "Old Card", "{G}", 1, "G", "G", "Creature", "rare", "old", "1", NOT_STANDARD),
+            (1, "Lightning Bolt", "{R}", 1, "R", "R", "Instant", None, None,
+             "rare", "sta", "42", LEGAL_ALL),
+            (2, "Lightning Bolt", "{R}", 1, "R", "R", "Instant", None, None,
+             "rare", "vma", "99", LEGAL_ALL),
+            (3, "Mountain", "", 0, "", "", "Basic Land — Mountain", None, None,
+             "basic", "pana", "219", LEGAL_ALL),
+            (4, "Counterspell", "{U}{U}", 2, "U", "U", "Instant", None, None,
+             "uncommon", "sta", "12", LEGAL_ALL),
+            (5, "Sheoldred", "{2}{B}{B}", 4, "B", "B", "Creature", "4", "5",
+             "mythic", "dmu", "107", LEGAL_ALL),
+            (6, "Old Card", "{G}", 1, "G", "G", "Creature", None, None,
+             "rare", "old", "1", NOT_STANDARD),
+            (7, "Torbran, Thane of Red Fell", "{2}{R}{R}", 4, "R", "R",
+             "Legendary Creature", "3", "3", "rare", "eld", "165", LEGAL_ALL),
+            # A colorless-cost dual land: no colored mana in its cost, but its
+            # ability produces two colors, so CR 903.4 gives it a two-color
+            # identity anyway -- the exact trap Guildgates and Temples are.
+            (8, "Boros Guildgate", "", 0, "", "R,W", "Land", None, None,
+             "common", "grn", "251", LEGAL_ALL),
         ],
     )
     c.execute(
@@ -93,6 +107,34 @@ class TestCandidatePool:
         pool = db.candidate_pool(conn, "standard")
         assert [c["name"] for c in pool] == ["Lightning Bolt"]
         assert pool[0]["owned"] == 4
+
+    def test_pool_includes_power_and_toughness(self, conn):
+        own(conn, 5, 1)
+        sheoldred = next(c for c in db.candidate_pool(conn, "standard")
+                          if c["name"] == "Sheoldred")
+        assert (sheoldred["power"], sheoldred["toughness"]) == ("4", "5")
+
+    def test_pool_size_matches_the_untruncated_count(self, conn):
+        own(conn, 1, 4)
+        own(conn, 4, 4)
+        assert db.candidate_pool_size(conn, "standard") == len(
+            db.candidate_pool(conn, "standard")
+        )
+
+    def test_pool_size_reveals_truncation_a_short_result_list_would_hide(self, conn):
+        """Regression: get_deck_candidates used to default limit=400 and
+        report only `count`, so a player who owned more than that (real
+        case: 857 Standard-legal cards, `limit` capped at 400) had no way to
+        tell a full pool from a silently truncated one -- and because the
+        SQL orders by mana value, the truncation wasn't even a random slice:
+        it dropped every card above a certain mana value outright."""
+        own(conn, 1, 4)
+        own(conn, 4, 4)
+        full_size = db.candidate_pool_size(conn, "standard")
+        assert full_size == 2
+        truncated = db.candidate_pool(conn, "standard", limit=1)
+        assert len(truncated) == 1
+        assert full_size > len(truncated)
 
     def test_colors_filter_uses_color_identity(self, conn):
         own(conn, 1, 4)
@@ -196,6 +238,86 @@ class TestValidation:
         errors = db.validate_deck(conn, cards, "standard")["errors"]
         assert len(errors) >= 3  # copy limit, size, illegal card
 
+    def test_brawl_size_includes_the_commander_not_on_top_of_it(self, conn):
+        """Regression: the minimum used to be checked against the mainboard
+        alone, so a legal 59-main + 1-commander Standard Brawl deck (60 total,
+        Arena's actual rule) was rejected for being one card short, and the
+        validator would only accept it by padding the mainboard to 60 -- a
+        61-card deck Arena itself would reject."""
+        cards = [
+            {"name": "Torbran, Thane of Red Fell", "quantity": 1, "board": "commander"},
+            {"name": "Lightning Bolt", "quantity": 1, "board": "main"},
+            {"name": "Mountain", "quantity": 58, "board": "main"},
+        ]
+        result = db.validate_deck(conn, cards, "standardbrawl")
+        assert result["valid"] is True
+        assert result["mainboard_size"] == 59
+        assert result["commander_size"] == 1
+
+    def test_brawl_deck_without_a_commander_is_rejected(self, conn):
+        cards = [{"name": "Mountain", "quantity": 60, "board": "main"}]
+        result = db.validate_deck(conn, cards, "standardbrawl")
+        assert any("needs a commander" in e for e in result["errors"])
+
+    def test_brawl_deck_with_two_commanders_is_rejected(self, conn):
+        cards = [
+            {"name": "Torbran, Thane of Red Fell", "quantity": 1, "board": "commander"},
+            {"name": "Sheoldred", "quantity": 1, "board": "commander"},
+            {"name": "Mountain", "quantity": 58, "board": "main"},
+        ]
+        result = db.validate_deck(conn, cards, "standardbrawl")
+        assert any("exactly one commander, found 2" in e for e in result["errors"])
+
+    def test_card_outside_commander_color_identity_is_rejected(self, conn):
+        """Sheoldred is black; the commander is mono-red. This is the bug
+        report's 'off-identity cards' case."""
+        cards = [
+            {"name": "Torbran, Thane of Red Fell", "quantity": 1, "board": "commander"},
+            {"name": "Sheoldred", "quantity": 1, "board": "main"},
+            {"name": "Mountain", "quantity": 58, "board": "main"},
+        ]
+        result = db.validate_deck(conn, cards, "standardbrawl")
+        assert result["valid"] is False
+        assert any("color identity" in e and "Sheoldred" in e for e in result["errors"])
+
+    def test_colorless_cost_land_still_carries_its_produced_colors(self, conn):
+        """Regression: Guildgates and Temples cost {0} and have no colored
+        mana symbol in their cost, so a naive "check the cost" identity read
+        would wrongly call them colorless. CR 903.4 says the colors they can
+        produce count too -- a Boros Guildgate (R/W) is off-identity for a
+        mono-red commander even though its mana cost has no color in it."""
+        cards = [
+            {"name": "Torbran, Thane of Red Fell", "quantity": 1, "board": "commander"},
+            {"name": "Boros Guildgate", "quantity": 1, "board": "main"},
+            {"name": "Mountain", "quantity": 58, "board": "main"},
+        ]
+        result = db.validate_deck(conn, cards, "standardbrawl")
+        assert result["valid"] is False
+        assert any("Boros Guildgate" in e for e in result["errors"])
+
+    def test_in_identity_cards_are_not_flagged(self, conn):
+        cards = [
+            {"name": "Torbran, Thane of Red Fell", "quantity": 1, "board": "commander"},
+            {"name": "Lightning Bolt", "quantity": 1, "board": "main"},
+            {"name": "Mountain", "quantity": 58, "board": "main"},
+        ]
+        result = db.validate_deck(conn, cards, "standardbrawl")
+        assert result["valid"] is True
+
+    def test_missing_legality_data_is_a_warning_not_a_silent_pass(self, conn):
+        conn.execute(
+            "INSERT INTO cards (arena_id, name, mana_cost, cmc, colors, "
+            "color_identity, type_line, rarity, set_code, collector_number, "
+            "legalities, source) VALUES (9, 'Unsynced Card', '{1}', 1, '', '', "
+            "'Artifact', 'common', 'xyz', '1', '{}', 'scryfall')"
+        )
+        conn.commit()
+        cards = [{"name": "Unsynced Card", "quantity": 4, "board": "main"},
+                 {"name": "Mountain", "quantity": 56, "board": "main"}]
+        result = db.validate_deck(conn, cards, "standard")
+        assert not any("Not legal" in e for e in result["errors"])
+        assert any("Unsynced Card" in w for w in result["warnings"])
+
 
 class TestArenaExport:
     def test_lines_carry_set_and_collector_number(self, conn):
@@ -238,6 +360,8 @@ class TestSuggestions:
         assert "Deck" in full["arena_export"]
         bolt = next(c for c in full["cards"] if c["name"] == "Lightning Bolt")
         assert bolt["owned"] == 4
+        sheoldred = next(c for c in full["cards"] if c["name"] == "Sheoldred")
+        assert (sheoldred["power"], sheoldred["toughness"]) == ("4", "5")
 
     def test_suggestions_are_listed_newest_first(self, conn):
         db.save_suggestion(conn, "First", "standard", [{"name": "Mountain", "quantity": 60}])

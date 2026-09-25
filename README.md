@@ -22,6 +22,7 @@ or suspending the game process.
 - [Improving an existing deck](#improving-an-existing-deck)
 - [MCP tools](#mcp-tools)
 - [About the collection](#about-the-collection)
+- [About match history](#about-match-history)
 - [Card data](#card-data)
 - [Log format notes](#log-format-notes)
 - [Design notes](#design-notes)
@@ -149,6 +150,12 @@ Served by `mtga-companion serve` at `http://127.0.0.1:8765/` (disable with
   with its card list, mana curve, land count, an Arena export you can copy, and
   an editable **Notes** panel (description, playstyle, comments,
   recommendations) — see below.
+- **Matches** — opponent, result, format and per-game record for matches
+  played while `mtga-companion serve` (or `ingest`) was running. Nothing
+  earlier is recoverable — see [About match history](#about-match-history).
+  Click a match for its play-by-play (what was cast or played as a land, in
+  order) and its combat (what attacked or blocked, and what it attacked or
+  blocked, by turn), both tagged you vs opponent.
 - **Collection** — known-owned cards with color, rarity and cost filters, and
   a banner stating whether this is your exact collection or a lower bound.
 - **Cards** — search all 21,000+ Arena cards with an owned count on each, and
@@ -286,7 +293,9 @@ Full list, beyond the deck builder above:
 | `get_collection` | Cards you're known to own, with a completeness flag |
 | `get_inventory` | Wildcards, gold, gems, vault progress |
 | `get_rank` | Constructed and limited rank |
-| `get_match_history` | Recent matches, optionally per deck (**unverified** — see below) |
+| `get_match_history` | Recent matches, optionally per deck — see [About match history](#about-match-history) |
+| `get_match_plays` | What was cast or played as a land, in order, self vs opponent |
+| `get_match_combat` | What attacked or blocked, and what it attacked or blocked, by turn |
 | `get_deck_stats` | Win rate, mana curve, land count, color spread |
 | `import_collection` | Load an exact collection CSV |
 | `refresh_cards` | Re-sync the card database |
@@ -351,9 +360,20 @@ candidate region's numbers without writing anything, for troubleshooting.
 |---|---|
 | `memory` | Read from Arena's own memory (above). Treated as exact. |
 | `import` | From an exact CSV. Also treated as exact. |
-| `grant` | Arena granted it while the tracker was running (booster, reward). |
-| `draft` | You picked it in a draft. |
+| `grant` | Arena granted it while the tracker was running (booster, reward) — **confirmed dead** (see below), never expect it to populate. |
+| `draft` | You picked it in a draft. Only recorded once the draft finishes. |
 | `played` | You cast it in one of your own games. |
+
+**`grant` cannot see boosters, and never will.** Opening a real booster on
+2026-08-26 produced no trace anywhere in `Player.log` or `Player-prev.log` --
+no `InventoryInfo.Changes`, no `CardsAdded`/`GrantedCards`, no request or
+response whose label mentions "card", "pack", "open", "store", "reward", or
+"grant". Wizards simply does not log booster contents anymore. This isn't a
+parser bug to fix; there is nothing in the log to parse. **A memory sync is
+the only way to pick up cards from a newly opened booster** — re-run
+`sudo .venv/bin/python scripts/sync_collection.py` after opening one, same as
+the caveat above already says. See `_extract_card_grants` in `parse.py` for
+the full investigation.
 
 **A deck's card list is deliberately not a source.** Arena's Import feature
 (pasting a decklist — including this app's own "Copy for Arena" text) lets you
@@ -370,6 +390,64 @@ memory for anything a deck's contents alone can't tell you.
 
 Every `get_collection` response carries a `completeness` field, because an
 agent that reads a missing card as "you don't own it" will give bad advice.
+
+## About match history
+
+Verified against two real completed matches (a win by concession, a normal
+loss) and one captured mid-game, live. Match traffic uses a fourth line shape
+found nowhere else in the log — see [Log format notes](#log-format-notes) —
+and `finalMatchResult` only ever names a `winningTeamId`, never "you", so
+telling a win from a loss requires knowing which seat is the player's own.
+Arena's only clue is the log line's own header, which carries the player's
+persistent account id as its correlator; there is no other field, anywhere in
+the payload, that says so more directly.
+
+**Only matches played while `mtga-companion serve` or `ingest` was running are
+recoverable.** Arena keeps just the current and previous session's logs
+(`Player.log` / `Player-prev.log`); once a third session starts, whatever
+match detail was in the oldest file is gone for good. The season's cumulative
+win/loss counts survive independently in `get_rank` (Arena reports those as
+running totals), but the per-match detail — opponent, format, per-game
+record — does not.
+
+`GreToClientEvent` carries the entire game-rules-engine protocol: board state,
+hands, the stack, hundreds of messages per match. Almost none of that is
+modeled. What is: the match format (`superFormat`); via `get_match_plays` /
+`GET /api/matches/{id}/plays`, what was cast or played as a land, in order,
+tagged self or opponent; and via `get_match_combat` /
+`GET /api/matches/{id}/combat`, what attacked or blocked, and what it
+attacked or blocked, by turn.
+
+**What `get_match_plays` can and can't tell you.** Arena has no "X played card
+Y" event; the only signal is an `AnnotationType_ZoneTransfer` annotation with
+category `CastSpell` or `PlayLand`, naming an *object* id and a *source zone*
+id, neither a card or a player. Turning that into a name and a side requires
+two caches built from messages that arrive once and are never repeated: an
+object's `grpId` (sent the moment it first becomes visible to us — turn one
+for our own cards, the moment they cast it for the opponent's) and a zone's
+`ownerSeatId` (sent once per game, in the very first full state). Both are
+kept in memory for the live-tailing session only, one match at a time —
+correct because Arena reuses small instance and zone ids across different
+matches, confirmed from two real captures reusing the very same ids for
+different cards. This covers *plays*, not the whole game: no counterspells or
+removal (nothing was cast, so there is no zone-transfer-from-hand to see), no
+life totals. Casting a card also proves you own it, so this doubles as the
+(until now unpopulated) `played` source `get_collection` already had a column
+for.
+
+**What `get_match_combat` can and can't tell you.** Combat has the opposite
+problem from casting: no discrete event at all, not even an indirect one.
+Arena just puts `attackState`/`blockState` directly on a creature's own
+object and resends its full state across several diffs while combat
+resolves — a block names the attacker it's blocking in `blockInfo`, an
+attack names its target's seat or object id in `attackInfo`, but nothing
+ever says "this is a new declaration" versus "this is the same one again".
+The key that makes deduplication correct without an explicit event id is
+(game, turn, instanceId, action) — repeats within one combat collide into
+the same row, a later turn or game does not. No damage totals, no combat
+tricks, no first strike ordering — just who attacked or blocked what, and
+when. Tokens (rarely) resolve to nothing, since they aren't in the card
+database.
 
 ## Card data
 
@@ -411,6 +489,12 @@ this format is usually described, and each one silently breaks a parser:
   flagged `precon` so they don't bury the dozen decks you built.
 - **One card can appear twice in a deck** under different `grpId`s (two printings
   of Shock). Deck views merge them by name.
+- **Match traffic uses a fourth line shape**, found nowhere else in the log:
+  `[UnityCrossThreadLogger]<date> <time>: Match to <id>: <Label>` (or
+  `<id> to Match:` for client-originated messages), JSON body on the next line.
+  `<id>` is the player's own persistent Arena account id, not a per-request
+  transaction id — the only place in the whole log that says which seat is
+  "me". See [About match history](#about-match-history).
 
 ## Design notes
 
@@ -418,12 +502,15 @@ this format is usually described, and each one silently breaks a parser:
   time, so each parser extractor is independent and fails soft; anything
   unrecognised lands in the `raw_events` table rather than crashing ingestion or
   being silently dropped. Check that table after a patch to spot format drift.
-- **Match and draft extractors are still unverified.** They are written from the
-  documented format but no game or draft has been captured yet, so treat them as
-  provisional until `get_match_history` returns a real result. Play a match (or
-  draft), run `mtga-companion ingest`, then check the `raw_events` table for
-  rows with reason `no extractor matched` — those hold the real payloads needed
-  to correct the extractors.
+- **Matches are verified**, but only once they end. `finalMatchResult` (win/loss)
+  and `superFormat` only arrive as part of the match's own event stream — see
+  [About match history](#about-match-history) for what is and isn't
+  recoverable, and why a fourth line shape was needed to read any of it.
+- **Draft picks are verified**, but only at the end of a draft. Arena's `BotDraft`
+  events never report which single card a given pick chose — only the
+  cumulative `PickedCards` list — and that list is only complete and
+  authoritative once `DraftStatus` reaches `"Completed"`. Abandoning a draft
+  mid-way records nothing for it.
 - **Ingestion is idempotent.** Everything upserts on Arena's own ids, and byte
   offsets are persisted per log file, so re-reading a log changes nothing.
 - **Arena rewrites `Player.log` on every launch.** The tailer detects the file

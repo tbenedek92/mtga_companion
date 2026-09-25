@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS matches (
     started_at      TEXT,
     ended_at        TEXT,
     event_name      TEXT,
+    format          TEXT,
     deck_id         TEXT,
     opponent_name   TEXT,
     opponent_colors TEXT,
@@ -87,6 +88,7 @@ CREATE TABLE IF NOT EXISTS matches (
     games_won       INTEGER,
     games_lost      INTEGER,
     on_play         INTEGER,
+    my_seat         INTEGER,
     raw             TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_matches_deck ON matches(deck_id);
@@ -107,6 +109,42 @@ CREATE TABLE IF NOT EXISTS match_cards_seen (
     arena_id INTEGER NOT NULL,
     is_self  INTEGER NOT NULL,
     PRIMARY KEY (match_id, arena_id, is_self)
+);
+
+-- One row per card cast or played as a land, in order, self or opponent.
+-- `seq` is the GRE annotation's own id -- monotonic for the whole match, so
+-- it orders plays correctly even across game boundaries within a Bo3.
+CREATE TABLE IF NOT EXISTS match_plays (
+    match_id    TEXT NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,
+    game_number INTEGER,
+    arena_id    INTEGER NOT NULL,
+    is_self     INTEGER,          -- 1 = the player, 0 = opponent, NULL = unknown
+    action      TEXT NOT NULL,    -- 'cast' | 'land'
+    PRIMARY KEY (match_id, seq)
+);
+
+-- One row per creature declared as an attacker or blocker, self or opponent.
+-- Keyed by the GRE object's own instanceId rather than its card (arena_id),
+-- since two copies of the same creature attacking the same turn would
+-- otherwise collide -- instanceId is unique per game, reused across
+-- different games in a Bo3 and across different matches, hence game_number
+-- in the key too. `seq` (the enclosing message's gameStateId) is informative
+-- ordering only, not part of the key: Arena resends the same declaration
+-- across several diffs while combat resolves, and re-declaring is exactly
+-- what should be deduplicated away, not distinguished by sequence.
+CREATE TABLE IF NOT EXISTS match_combat (
+    match_id         TEXT NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
+    game_number       INTEGER NOT NULL DEFAULT 0,
+    turn_number       INTEGER NOT NULL DEFAULT 0,
+    instance_id       INTEGER NOT NULL,
+    seq               INTEGER,
+    action            TEXT NOT NULL,    -- 'attack' | 'block'
+    arena_id          INTEGER NOT NULL,
+    is_self           INTEGER,
+    target_arena_id   INTEGER,          -- attack on a planeswalker/battle, or block's target attacker
+    target_is_player  INTEGER,          -- 1 if an attack targeted the opponent directly
+    PRIMARY KEY (match_id, game_number, turn_number, instance_id, action)
 );
 
 CREATE TABLE IF NOT EXISTS draft_picks (
@@ -250,6 +288,8 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("suggested_decks", "comments", "TEXT"),
     ("suggested_decks", "recommendations", "TEXT"),
     ("suggested_decks", "notes_updated_at", "TEXT"),
+    ("matches", "format", "TEXT"),
+    ("matches", "my_seat", "INTEGER"),
 )
 
 

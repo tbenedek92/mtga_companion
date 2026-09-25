@@ -87,6 +87,41 @@ def owned_by_name(conn: sqlite3.Connection) -> dict[str, int]:
     return {r["name"]: r["quantity"] for r in rows}
 
 
+def _candidate_where(
+    conn: sqlite3.Connection, fmt: str, colors: str | None, owned_only: bool
+) -> tuple[str, list[Any]]:
+    key = _legality_key(fmt)
+    where = [f"json_extract(c.legalities, '$.{key}') = 'legal'"]
+    params: list[Any] = []
+    if owned_only:
+        where.append(
+            "c.name IN (SELECT c2.name FROM card_ownership o "
+            "JOIN cards c2 ON c2.arena_id = o.arena_id)"
+        )
+    if colors:
+        # Colour identity, not colour: a card is castable in a deck whose
+        # identity covers it, which is what matters for deck legality.
+        wanted = {ch for ch in colors.upper() if ch in "WUBRG"}
+        for ch in set("WUBRG") - wanted:
+            where.append("c.color_identity NOT LIKE ?")
+            params.append(f"%{ch}%")
+    return " AND ".join(where), params
+
+
+def candidate_pool_size(
+    conn: sqlite3.Connection,
+    fmt: str = "standard",
+    colors: str | None = None,
+    owned_only: bool = True,
+) -> int:
+    """How many distinct card names candidate_pool would match before `limit`
+    cuts it off -- so a caller can tell a full pool from a truncated one."""
+    where, params = _candidate_where(conn, fmt, colors, owned_only)
+    return conn.execute(
+        f"SELECT COUNT(DISTINCT c.name) FROM cards c WHERE {where}", params
+    ).fetchone()[0]
+
+
 def candidate_pool(
     conn: sqlite3.Connection,
     fmt: str = "standard",
@@ -99,36 +134,27 @@ def candidate_pool(
     With `owned_only` the pool is what they can sleeve up today. Without it the
     pool widens to every legal card, and each entry still reports `owned` so an
     agent can weigh an upgrade against its wildcard cost.
+
+    Ordered by mana value then name -- a real mana curve, not an arbitrary
+    cut -- but if the pool is bigger than `limit`, this still silently drops
+    everything above whatever mana value the cutoff lands on. Call
+    candidate_pool_size first (or check `len()` against it) if `limit`
+    truncating the result would matter to the caller.
     """
-    key = _legality_key(fmt)
-    sql = [
-        "SELECT MIN(c.arena_id) AS arena_id, c.name, c.mana_cost, c.cmc,",
-        "       c.colors, c.color_identity, c.type_line, c.oracle_text,",
-        "       c.rarity, c.set_code, c.edhrec_rank",
-        "FROM cards c",
-        f"WHERE json_extract(c.legalities, '$.{key}') = 'legal'",
-    ]
-    params: list[Any] = []
-    if owned_only:
-        sql.append(
-            "AND c.name IN (SELECT c2.name FROM card_ownership o "
-            "JOIN cards c2 ON c2.arena_id = o.arena_id)"
-        )
-    if colors:
-        # Colour identity, not colour: a card is castable in a deck whose
-        # identity covers it, which is what matters for deck legality.
-        wanted = {ch for ch in colors.upper() if ch in "WUBRG"}
-        if wanted:
-            forbidden = set("WUBRG") - wanted
-            for ch in forbidden:
-                sql.append("AND c.color_identity NOT LIKE ?")
-                params.append(f"%{ch}%")
-    sql.append("GROUP BY c.name ORDER BY c.cmc, c.name LIMIT ?")
-    params.append(limit)
+    where, params = _candidate_where(conn, fmt, colors, owned_only)
+    sql = (
+        "SELECT MIN(c.arena_id) AS arena_id, c.name, c.mana_cost, c.cmc,\n"
+        "       c.colors, c.color_identity, c.type_line, c.oracle_text,\n"
+        "       c.power, c.toughness, c.rarity, c.set_code, c.edhrec_rank\n"
+        "FROM cards c\n"
+        f"WHERE {where}\n"
+        "GROUP BY c.name ORDER BY c.cmc, c.name LIMIT ?"
+    )
+    params = [*params, limit]
 
     owned = owned_by_name(conn)
     pool = []
-    for row in conn.execute("\n".join(sql), params):
+    for row in conn.execute(sql, params):
         entry = dict(row)
         entry["owned"] = owned.get(entry["name"], 0)
         pool.append(entry)
@@ -218,7 +244,8 @@ def validate_deck(
     cards: Iterable[dict[str, Any]],
     fmt: str = "standard",
 ) -> dict[str, Any]:
-    """Check a proposed decklist for size, copy limits and legality.
+    """Check a proposed decklist for size, copy limits, legality and (for
+    Brawl formats) commander color identity.
 
     Returns every problem found rather than the first, so an agent can fix a
     list in one pass instead of round-tripping per error.
@@ -227,42 +254,72 @@ def validate_deck(
     normalised = (fmt or "").strip().lower()
     singleton = normalised in SINGLETON_FORMATS
     max_copies = 1 if singleton else 4
+    # Arena's deck-size numbers already include the commander for Brawl
+    # formats (e.g. Standard Brawl is 60 total, not 60 main + 1 commander).
     min_size = MIN_DECK_SIZE.get(normalised, DEFAULT_MIN_DECK_SIZE)
 
     totals: dict[str, int] = defaultdict(int)
     board_totals: dict[str, int] = defaultdict(int)
+    commander_names: list[str] = []
     for card in cards:
         name = card.get("name")
         qty = int(card.get("quantity") or 0)
         if not name or qty <= 0:
             continue
         totals[name] += qty
-        board_totals[card.get("board", "main")] += qty
+        board = card.get("board", "main")
+        board_totals[board] += qty
+        if board == "commander":
+            commander_names.append(name)
 
     errors: list[str] = []
     warnings: list[str] = []
     unknown: list[str] = []
     illegal: list[str] = []
+    unknown_legality: list[str] = []
+    rows: dict[str, sqlite3.Row] = {}
 
     for name, qty in totals.items():
         row = conn.execute(
-            "SELECT name, legalities FROM cards WHERE name = ? LIMIT 1", (name,)
+            "SELECT name, legalities, color_identity FROM cards WHERE name = ? LIMIT 1",
+            (name,),
         ).fetchone()
         if row is None:
             unknown.append(name)
             continue
+        rows[name] = row
         if name in BASIC_LANDS:
             continue  # unlimited copies, always legal
         if qty > max_copies:
             errors.append(f"{name}: {qty} copies, limit is {max_copies}")
         legalities = json.loads(row["legalities"] or "{}")
-        if legalities and legalities.get(key) != "legal":
+        if not legalities:
+            # Missing sync data, not a ruling -- flag it rather than silently
+            # treating an unknown as legal.
+            unknown_legality.append(name)
+        elif legalities.get(key) != "legal":
             illegal.append(name)
 
     main = board_totals.get("main", 0)
-    if main < min_size:
-        errors.append(f"Mainboard has {main} cards, minimum for {fmt} is {min_size}")
+    commander_zone = board_totals.get("commander", 0)
     side = board_totals.get("sideboard", 0)
+
+    if singleton:
+        if commander_zone == 0:
+            errors.append(f"{fmt} needs a commander in the 'commander' board -- none given")
+        elif commander_zone > 1:
+            errors.append(f"{fmt} allows exactly one commander, found {commander_zone}")
+        total_size = main + commander_zone
+        if total_size < min_size:
+            errors.append(
+                f"Deck has {total_size} cards ({main} main + {commander_zone} "
+                f"commander), minimum for {fmt} is {min_size}"
+            )
+    else:
+        total_size = main
+        if main < min_size:
+            errors.append(f"Mainboard has {main} cards, minimum for {fmt} is {min_size}")
+
     if side > 15:
         errors.append(f"Sideboard has {side} cards, maximum is 15")
 
@@ -273,19 +330,51 @@ def validate_deck(
         )
     if illegal:
         errors.append(f"Not legal in {fmt}: {', '.join(sorted(illegal)[:10])}")
+    if unknown_legality:
+        warnings.append(
+            f"Legality data missing, could not confirm: "
+            f"{', '.join(sorted(unknown_legality)[:10])}"
+        )
+
+    if singleton and commander_names:
+        # Color identity comes from mana symbols in cost *and* rules text
+        # (CR 903.4), so a colorless-cost land like a Guildgate or Temple
+        # still carries the identity of the colors it can produce.
+        identity: set[str] = set()
+        for cname in commander_names:
+            row = rows.get(cname)
+            if row and row["color_identity"]:
+                identity |= {c for c in row["color_identity"].split(",") if c}
+        off_identity = []
+        for name in totals:
+            if name in BASIC_LANDS or name in commander_names:
+                continue
+            row = rows.get(name)
+            if row is None:
+                continue
+            card_identity = {c for c in (row["color_identity"] or "").split(",") if c}
+            if not card_identity.issubset(identity):
+                off_identity.append(name)
+        if off_identity:
+            errors.append(
+                f"Outside commander's color identity "
+                f"({''.join(sorted(identity)) or 'colorless'}): "
+                f"{', '.join(sorted(off_identity)[:10])}"
+            )
 
     lands = conn.execute(
         "SELECT COUNT(*) FROM cards WHERE name IN (%s) AND type_line LIKE '%%Land%%'"
         % ",".join("?" * len(totals)),
         list(totals),
     ).fetchone()[0] if totals else 0
-    if main >= min_size and lands == 0:
+    if total_size >= min_size and lands == 0:
         warnings.append("No lands in the mainboard")
 
     return {
         "valid": not errors,
         "format": fmt,
         "mainboard_size": main,
+        "commander_size": commander_zone,
         "sideboard_size": side,
         "distinct_cards": len(totals),
         "errors": errors,
@@ -640,7 +729,8 @@ def get_suggestion(conn: sqlite3.Connection, suggestion_id: int) -> dict[str, An
     out["validation"] = json.loads(out.get("validation") or "{}")
     cards = conn.execute(
         "SELECT s.name, s.quantity, s.board, s.owned, s.arena_id, "
-        "       c.mana_cost, c.cmc, c.type_line, c.rarity, c.image_uri "
+        "       c.mana_cost, c.cmc, c.type_line, c.power, c.toughness, "
+        "       c.rarity, c.image_uri "
         "FROM suggested_deck_cards s LEFT JOIN cards c ON c.arena_id = s.arena_id "
         "WHERE s.suggestion_id = ? ORDER BY s.board, c.cmc, s.name",
         (suggestion_id,),

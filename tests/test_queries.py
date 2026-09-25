@@ -14,19 +14,20 @@ def conn(tmp_path):
     c = store.connect(tmp_path / "test.sqlite")
     c.executemany(
         "INSERT INTO cards (arena_id, name, mana_cost, cmc, colors, type_line,"
-        " oracle_text, rarity, set_code, source) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        " oracle_text, power, toughness, rarity, set_code, source)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         [
             (1, "Lightning Bolt", "{R}", 1, "R", "Instant", "Deals 3 damage.",
-             "rare", "sta", "scryfall"),
+             None, None, "rare", "sta", "scryfall"),
             # Same name, different printing -- Arena gives each its own grpId.
             (2, "Lightning Bolt", "{R}", 1, "R", "Instant", "Deals 3 damage.",
-             "rare", "vma", "scryfall"),
+             None, None, "rare", "vma", "scryfall"),
             (3, "Mountain", "", 0, "", "Basic Land — Mountain", "({T}: Add {R}.)",
-             "basic", "m19", "scryfall"),
+             None, None, "basic", "m19", "scryfall"),
             (4, "Goblin Guide", "{R}", 1, "R", "Creature — Goblin Scout", "Haste.",
-             "rare", "zen", "scryfall"),
+             "2", "2", "rare", "zen", "scryfall"),
             (5, "Counterspell", "{U}{U}", 2, "U", "Instant", "Counter target spell.",
-             "uncommon", "sta", "scryfall"),
+             None, None, "uncommon", "sta", "scryfall"),
         ],
     )
     c.execute(
@@ -63,6 +64,11 @@ def test_search_matches_rules_text(conn):
 def test_search_filters_combine(conn):
     results = queries.search_cards(conn, colors="R", max_cmc=1, rarity="rare")
     assert sorted(r["name"] for r in results) == ["Goblin Guide", "Lightning Bolt"]
+
+
+def test_search_includes_power_and_toughness(conn):
+    result = queries.search_cards(conn, query="Goblin Guide")[0]
+    assert (result["power"], result["toughness"]) == ("2", "2")
 
 
 def test_search_owned_only_uses_ownership_table(conn):
@@ -109,6 +115,12 @@ def test_get_deck_splits_boards_and_resolves_cards(conn):
         "Lightning Bolt", "Goblin Guide", "Mountain"
     }
     assert [c["name"] for c in deck["sideboard"]] == ["Counterspell"]
+
+
+def test_get_deck_includes_power_and_toughness(conn):
+    goblin = next(c for c in queries.get_deck(conn, "d1")["mainboard"]
+                  if c["name"] == "Goblin Guide")
+    assert (goblin["power"], goblin["toughness"]) == ("2", "2")
 
 
 def test_get_deck_merges_printings_of_the_same_card(conn):
@@ -169,6 +181,54 @@ def test_match_history_filters_by_deck(conn):
     assert [m["match_id"] for m in queries.get_match_history(conn, deck_id="d1")] == ["m1"]
     # Newest first when unfiltered.
     assert [m["match_id"] for m in queries.get_match_history(conn)] == ["m2", "m1"]
+
+
+def test_match_plays_are_ordered_and_resolved_to_card_names(conn):
+    conn.execute("INSERT INTO matches (match_id) VALUES ('m1')")
+    conn.executemany(
+        "INSERT INTO match_plays (match_id, seq, game_number, arena_id, is_self, action) "
+        "VALUES (?,?,?,?,?,?)",
+        [
+            ("m1", 200, 1, 5, 0, "cast"),   # opponent, later seq
+            ("m1", 154, 1, 1, 1, "land"),   # self, earliest seq
+        ],
+    )
+    conn.commit()
+
+    plays = queries.get_match_plays(conn, "m1")
+    assert [(p["is_self"], p["name"]) for p in plays] == [
+        (1, "Lightning Bolt"), (0, "Counterspell")
+    ]
+
+
+def test_match_plays_empty_for_unknown_match(conn):
+    assert queries.get_match_plays(conn, "nope") == []
+
+
+def test_match_combat_orders_by_turn_and_resolves_names(conn):
+    conn.execute("INSERT INTO matches (match_id) VALUES ('m1')")
+    conn.executemany(
+        "INSERT INTO match_combat (match_id, game_number, turn_number, instance_id, "
+        "seq, action, arena_id, is_self, target_arena_id, target_is_player) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [
+            ("m1", 1, 6, 358, 20, "block", 5, 0, 1, 0),   # opponent blocks my Lightning Bolt
+            ("m1", 1, 3, 280, 10, "attack", 1, 1, None, 1),  # I attack the player, turn 3
+        ],
+    )
+    conn.commit()
+
+    combat = queries.get_match_combat(conn, "m1")
+    assert [(c["turn_number"], c["is_self"], c["action"], c["name"]) for c in combat] == [
+        (3, 1, "attack", "Lightning Bolt"),
+        (6, 0, "block", "Counterspell"),
+    ]
+    assert combat[0]["target_is_player"] == 1
+    assert combat[1]["target_name"] == "Lightning Bolt"
+
+
+def test_match_combat_empty_for_unknown_match(conn):
+    assert queries.get_match_combat(conn, "nope") == []
 
 
 def test_status_flags_disabled_logging(conn, monkeypatch):
