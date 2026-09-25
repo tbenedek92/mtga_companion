@@ -8,7 +8,7 @@ Reviewed: 2026-08-28 · Format context: **Commander (100-card singleton, 4-playe
 > 120 life. **That premise inverts in 1v1.** In Standard (20 life) and Arena Brawl (25 life,
 > 1v1), red's face-damage plan is at its strongest. The video's *diagnostic framework* is
 > excellent and transfers. Its *prescription* — abandon burn for grindy value engines — is the
-> wrong lesson for a Standard mono-red deck. See `deckbuilding-guidelines.md`.
+> wrong lesson for a Standard mono-red deck. See `../SKILL.md`.
 
 ---
 

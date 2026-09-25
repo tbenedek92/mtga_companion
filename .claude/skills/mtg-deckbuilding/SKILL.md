@@ -1,12 +1,15 @@
-# Deckbuilding Guidelines
+---
+name: mtg-deckbuilding
+description: Deckbuilding principles for MTG Arena Standard (60-card, 1v1, 20 life), translated from multiplayer Commander advice. Use whenever building, evaluating, cutting, or diagnosing a Standard deck — card selection, mana curve, land counts, category budgets, sideboarding, or checking whether a deck actually has a win condition. For Brawl/Historic Brawl (100-card singleton commander deck), see references/brawl_mode.md instead.
+---
 
-Derived from two Commander deckbuilding videos, translated for the formats I actually play:
-**Standard** (60-card, 1v1, 20 life) and **Arena Brawl / Historic Brawl** (100-card singleton,
-1v1, 25 life).
+# MTG deckbuilding (Standard, 1v1)
 
-Sources:
-- [`video-notes-commander-from-scratch.md`](video-notes-commander-from-scratch.md) — the 7-step process
-- [`video-notes-red-analysis.md`](video-notes-red-analysis.md) — red's weaknesses, and what changed
+Derived from two Commander deckbuilding videos, translated for **Standard** (60-card, 1v1,
+20 life) — the format actually played here. A parallel translation for **Arena Brawl /
+Historic Brawl** (100-card singleton, 1v1, 25 life) lives in `references/brawl_mode.md`; use
+this file only when the deck in question is a Brawl/commander deck. Full source notes and a
+red/burn deep-dive are also in `references/`.
 
 Last updated: 2026-08-28
 
@@ -17,22 +20,23 @@ Last updated: 2026-08-28
 **Both source videos are about multiplayer Commander: 4 players, 40 life each, 120 life across
 the table, singleton, and a social metagame where being the visible threat gets you killed.**
 
-I play neither of those things. The structural differences that break the videos' advice:
+That is not the format being played here. The structural differences that break the videos'
+advice:
 
-| | Video's Commander | My Standard | My Brawl (Arena) |
-|---|---|---|---|
-| Players | 4 | 2 | 2 |
-| Life to burn through | 120 | **20** | **25** |
-| Deck size | 100 singleton | 60, up to 4-of | 100 singleton |
-| Guaranteed card | Commander | none | Commander |
-| Game length | 8–12 turns | **4–7 turns** | 6–9 turns |
-| Politics / threat assessment | central | **irrelevant** | **irrelevant** |
+| | Video's Commander | Standard |
+|---|---|---|
+| Players | 4 | 2 |
+| Life to burn through | 120 | **20** |
+| Deck size | 100 singleton | 60, up to 4-of |
+| Guaranteed card | Commander | none |
+| Game length | 8–12 turns | **4–7 turns** |
+| Politics / threat assessment | central | **irrelevant** |
 
 **Consequences, stated plainly:**
 
-1. **The red video's central thesis does not apply to my decks.** It argues red's burn plan is
-   weak *because opponents have 120 collective life*. Against 20 or 25 life in 1v1, burn is at
-   its strongest. Take the video's *diagnosis* of red; discard its *prescription*.
+1. **The red video's central thesis does not apply here.** It argues red's burn plan is weak
+   *because opponents have 120 collective life*. Against 20 or 25 life in 1v1, burn is at its
+   strongest. Take the video's *diagnosis* of red; discard its *prescription*.
 2. **"Don't be the visible threat" is meaningless in 1v1.** There is nobody else to redirect
    hostility toward. Deploy threats as fast as they are useful.
 3. **All the ratios are 100-card multiplayer ratios.** 38 lands / 12 card advantage / 10 ramp /
@@ -51,15 +55,15 @@ real value of both videos.
 ### 1.1 Require multiple overlapping synergies ★
 
 The most important selection rule in either video. Any single keyword matches thousands of
-cards. **A card earns its slot when it does several things your deck cares about at once.**
+cards. **A card earns its slot when it does several things the deck cares about at once.**
 
-Method: write out your deck's core card (commander, or key engine piece) **line by line** and
+Method: write out the deck's core card (commander, or key engine piece) **line by line** and
 extract every keyword hiding in it. Then score candidates against that keyword list. Two
 synergies is a real card; one synergy is filler.
 
 Corollary: **cards must synergize with each other, not only with the centrepiece.** In Brawl the
-test is "could I win without ever casting my commander?" In Standard it's "does this card still
-do work when my best card is answered?"
+test is "could this win without ever casting the commander?" In Standard it's "does this card
+still do work when the best card is answered?"
 
 ### 1.2 The mana-value rubric ★★
 
@@ -71,17 +75,17 @@ justify themselves.
 |---|---|---|
 | 6+ | Must dramatically change the game state or win within a turn. No exceptions. | Standard aggro: **zero** of these. Brawl: 2–3 max. |
 | 5 | Dramatic advantage the turn it lands, or an unanswered threat that runs away. | Standard: 0–2. Brawl: a small handful. |
-| 4 | Powerful **and** highly synergistic. | Standard aggro: the top of your curve. |
+| 4 | Powerful **and** highly synergistic. | Standard aggro: the top of the curve. |
 | 1–3 | **Must give value turn after turn**, not just on arrival. | This is where 1v1 decks live. |
 
 ### 1.3 Card advantage means *net* cards
 
 Strict definition, worth internalising: a card is card advantage only if it **replaces itself and
 draws beyond that**. Looting and rummaging (draw 2, discard 2 for one card spent) are **card
-selection**, not advantage. Don't let selection inflate your count.
+selection**, not advantage. Don't let selection inflate the count.
 
 Both still matter — but count them in separate buckets and know which problem each solves.
-Selection fixes "I have the wrong cards." Advantage fixes "I have no cards."
+Selection fixes "wrong cards in hand." Advantage fixes "no cards left."
 
 ### 1.4 Cut from the top of the curve
 
@@ -111,20 +115,20 @@ Most homebrews fail this and their owners never check.
 | Brawl | turn 7 |
 
 Target **3–4 real win conditions** in Brawl. In 60-card Standard, redundancy replaces variety —
-you want 8–12 *copies* of a small number of finisher effects.
+aim for 8–12 *copies* of a small number of finisher effects.
 
 ### 1.6 Audit weaknesses honestly, then sort real from fake
 
-The red video's best structural move: enumerate what your colour/deck is bad at, then decide
+The red video's best structural move: enumerate what a colour/deck is bad at, then decide
 **which weaknesses are real constraints to design around and which are outdated assumptions to
 attack.** Applied to red: "bad permanent interaction" is real and permanent; "no cheap value
 engines" turned out to be fake as of recent sets.
 
 Do this for any archetype before building. Write the list down.
 
-### 1.7 Make your removal asymmetric for free
+### 1.7 Make removal asymmetric for free
 
-If your deck's key permanents are types your sweeper doesn't hit, a symmetric board wipe becomes
+If the deck's key permanents are types its sweeper doesn't hit, a symmetric board wipe becomes
 one-sided at no cost. Choose sweepers that dodge your own threats. This generalises well beyond
 Commander.
 
@@ -146,8 +150,8 @@ card selection and tutors. In Standard you fight it by **playing four copies**.
 
 Practical rule: **if a card is core to the plan, play 4. If you wouldn't play 4, ask why it's in
 the deck at all.** One-ofs and two-ofs in a 60-card deck are usually a sign of indecision, not
-sophistication. Legitimate exceptions: legendary permanents, situational cards you only want one
-of, and curve-topping finishers.
+sophistication. Legitimate exceptions: legendary permanents, situational cards wanted as a
+single copy, and curve-topping finishers.
 
 ### 2.2 Land counts
 
@@ -184,91 +188,62 @@ card advantage.
 ### 2.5 Sideboard
 
 15 cards for Bo3. Don't build it as "cards that are almost good enough." Build it as answers to
-the three or four decks you actually lose to. If you play Bo1, that budget goes back into
-maindeck consistency.
+the three or four decks actually being lost to. For Bo1, that budget goes back into maindeck
+consistency.
 
 ---
 
-## 3. Brawl / Historic Brawl (100-card singleton, 1v1, 25 life)
-
-This is where the videos' process transfers **best**, with compression. Same 100-card singleton
-structure and a guaranteed commander — but 1v1 at 25 life, so it plays roughly twice as fast as
-multiplayer Commander.
-
-### 3.1 What carries over unchanged
-
-- The whole **7-step process** as a sequence.
-- The **line-by-line commander breakdown** and multiple-overlapping-synergy rule.
-- "Could I win without casting my commander?"
-- **Commander-cost curve shaping:** if you'll always cast the commander on turn N, run fewer
-  cards at N. If the commander needs a board already in play, load 1–3 drops so it lands into an
-  active board.
-
-### 3.2 What to compress
-
-| Category | Video (multiplayer) | Brawl 1v1 |
-|---|---|---|
-| Lands | 38 | **35–37** (33–35 for a genuinely aggressive deck) |
-| Card advantage | 12–17 | **10–12**, weighted cheaper — 8+ at MV ≤ 3 |
-| Normal ramp | 10–11 | **6–9**, and it must do something besides make mana |
-| Explosive ramp | 3–5 | **1–2** — games end before it pays off |
-| Interaction | 10 + 2–4 wipes | **12–15 + 1–2 wipes** ← *increased* |
-| Top end (MV 6+) | as budget allows | **2–3 max** |
-
-**Interaction goes up, ramp goes down.** In multiplayer, someone else usually answers the scary
-thing and ramp buys you a big turn. In 1v1 there is no "someone else" — if you can't answer
-their commander, you lose to it, and a turn spent ramping is a turn they spent attacking.
-
-### 3.3 The 1v1 commander reality
-
-The opponent's commander is guaranteed to show up, is recastable, and is usually their best card.
-**Carry answers that handle a recurring threat** — exile, bounce-to-hand is weak, and "kill it
-once" is often not enough. Conversely, your own commander will eat their removal, so have a plan
-for the turns it isn't on the board.
-
-### 3.4 Ignore entirely
-
-Bracket calibration, "don't play something that pisses people off," political cards, threat
-assessment, and anything about not drawing the table's attention. There is no table.
-
----
-
-## 4. Working checklist
+## 3. Working checklist
 
 Sequence for building anything new:
 
-1. **Pick the centrepiece.** Brawl: the commander (rule of cool is legitimate — I have to want to
-   play it). Standard: the strategy, then the payoff cards. Bottom-up is fine and often better.
+1. **Pick the strategy, then the payoff cards.** Bottom-up is fine and often better.
 2. **Break the centrepiece into keywords, line by line.** Write them down.
-3. **Pull candidates from my own collection first** (`get_deck_candidates`, `search_cards`), then
+3. **Pull candidates from the collection first** (`get_deck_candidates`, `search_cards`), then
    widen. Score every candidate on how many keywords it hits. Two or more, or it's out.
 
-   > ⚠️ **`get_deck_candidates` truncation trap.** Do **not** pass `limit` by hand. The result is
-   > ordered by ascending mana value, so a low `limit` silently amputates the **top of the
-   > curve** — you get a plausible-looking list with no expensive cards in it and no obvious sign
-   > anything is missing. Always check the `total_matching` and `truncated` fields in the
-   > response. My Standard pool is **857 cards**; a `limit=400` call returned a list that ended
-   > five cards into the three-drops and contained not a single card costing 4 or more.
+   > ⚠️ **`get_deck_candidates` truncation trap.** Do **not** pass `limit` by hand — if the result
+   > risks exceeding the token limit, let it spill to a file and `jq` it instead of shrinking
+   > `limit`. The result is ordered by ascending mana value, so a low `limit` silently amputates
+   > the **top of the curve** — a plausible-looking list with no expensive cards in it and no
+   > obvious sign anything is missing. Always check the `total_matching` and `truncated` fields.
 4. **Apply the MV rubric** (§1.2). Cut from the top of the curve down.
-5. **Fill the category budget** for the format (§2.3 / §3.2).
-6. **Set the land count** from the archetype table, not from habit.
+5. **Fill the category budget** (§2.3).
+6. **Set the land count** from the archetype table (§2.2), not from habit.
 7. **Goldfish to the format's checkpoint turn** and run the three win-condition questions.
-8. **Verify buildability** — `validate_deck` for wildcard cost before committing. Remember
-   `owned` counts are a **lower bound** (Arena stopped reporting collections in 2021), and my
-   rare wildcard count currently reads as unknown.
+8. **Verify buildability** — `validate_deck` for wildcard cost before committing. `owned` counts
+   are a **lower bound** (Arena stopped reporting collections in 2021).
 9. **Play it, then diagnose with real data** — `get_match_plays` for turn-by-turn casts rather
    than guessing from feel.
 
 ---
 
-## 5. Explicitly does *not* transfer
+## 4. Explicitly does *not* transfer
 
-Recorded so I don't reapply these by accident:
+Recorded so these aren't reapplied by accident:
 
 - ❌ "38 lands, always" → ratio-based, archetype-dependent, and much lower in 60-card aggro.
 - ❌ "10+ pieces of ramp" → ramp is a liability in fast 1v1 unless it's also doing something else.
-- ❌ "Red's burn plan is too weak to win" → true at 120 life, false at 20–25.
+- ❌ "Red's burn plan is too weak to win" → true at 120 life, false at 20.
 - ❌ "Hold your damage payoffs so you don't get targeted" → 1v1; deploy on curve.
 - ❌ Bracket 1–4 power calibration → a multiplayer social contract, not a ladder concept.
 - ❌ "Cut cards that are too rude" → the ladder has no feelings.
 - ❌ Singleton tutoring/redundancy logic → in Standard, redundancy is spelled "4×".
+
+---
+
+## References
+
+- `references/brawl_mode.md` — the parallel translation for Arena Brawl / Historic Brawl
+  (100-card singleton, 1v1, 25 life). Use this instead of this file when the deck in question is
+  a Brawl/commander deck.
+- `references/video-notes-commander-from-scratch.md` — full notes on the 7-step Commander
+  deckbuilding process (source video).
+- `references/video-notes-red-analysis.md` — full notes on red's weaknesses and what changed
+  about the colour (source video).
+- `references/red-principles-and-burn-deck.md` — red-specific principles and a worked mono-red
+  Standard burn list, applying §1–§2 above.
+
+Load a reference file only when going deep on that specific sub-topic (e.g. building a red deck,
+building a Brawl deck, or wanting the original video's full reasoning) — the sections above are
+the day-to-day Standard summary.

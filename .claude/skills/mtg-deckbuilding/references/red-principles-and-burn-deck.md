@@ -1,6 +1,6 @@
 # Red in 1v1 Standard — Principles, and the Mono-Red Burn List
 
-Companion to [`deckbuilding-guidelines.md`](deckbuilding-guidelines.md) and
+Companion to [`../SKILL.md`](../SKILL.md) and
 [`video-notes-red-analysis.md`](video-notes-red-analysis.md).
 
 Written: 2026-08-28 · Format: **Standard — 60 cards, 1v1, 20 life, up to 4 copies**

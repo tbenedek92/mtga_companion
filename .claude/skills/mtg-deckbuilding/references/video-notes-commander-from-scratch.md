@@ -3,7 +3,7 @@
 Source: https://www.youtube.com/watch?v=YJ8X8bO8jeY
 Reviewed: 2026-08-28 · Format context: **Commander (100-card singleton, 4-player, 40 life)**
 
-> Read the caveats in `deckbuilding-guidelines.md` before applying the ratios. This video's
+> Read the caveats in `../SKILL.md` and `brawl_mode.md` before applying the ratios. This video's
 > numbers are tuned for multiplayer Commander. They transfer to Brawl with compression and
 > do **not** transfer to 60-card Standard at all.
 
